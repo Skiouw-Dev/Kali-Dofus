@@ -18,11 +18,30 @@ import ctypes
 import ctypes.wintypes as wt
 import json
 import os
+import re
+import subprocess
 import sys
 import threading
 import time
 import tkinter as tk
+import urllib.request
 from tkinter import font as tkfont
+from tkinter import messagebox
+
+# --- Mise à jour automatique via GitHub ---
+UPDATE_URL = "https://raw.githubusercontent.com/Skiiouw/Kali-Dofus/main/app.py"
+
+
+def parse_remote_version(source):
+    m = re.search(r'APP_VERSION\s*=\s*"([^"]+)"', source)
+    return m.group(1) if m else None
+
+
+def version_tuple(v):
+    try:
+        return tuple(int(x) for x in v.split("."))
+    except Exception:
+        return (0,)
 
 # ----------------------------------------------------------------------------
 # API Windows (ctypes, aucune dépendance)
@@ -74,7 +93,7 @@ VK_CODES = {
 }
 
 APP_TITLE = "Kali"
-APP_VERSION = "1.9.3"
+APP_VERSION = "2.0.1"
 # Icône embarquée (PNG base64) — utilisée pour la barre de titre
 # et la barre des tâches, identique au .ico de l'exe et du tray
 ICON_PNG_16 = "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAADVUlEQVR4nFWTTWhcVRiG3++7586dn8zcpJkkg+lEpSZUKUo0VhELEkypaZHSRdGFWcRdQGoWFgzCGHFh3YiKliLVhRWMVKWh1BotttgSF3EoGoUYsVUcbZtMMjPJzL0z95zzuQiIPvt39bwPoSCMabIFkczVIkaaN292wjoQC8J/IIaADeLdPZWdD+Cr14jWCwVhAoCDS7K7dPL4qcr8bL/oCMQKIhaw5t81sQOxBqQU/KF913rHjoyfGaSL6ohI++XJN0//dWo6b63VEjXZhKE4ngf2kgARJGpC1+tg1yFOtNmNxSt32mZ4ekJkl7o2j5FacS5vrWh2PeU/tB/+/UOoFhdQLX4NWIPEjkF07T2E1moVK19+wLpe1bXiXOdvX0w8yeHKraw0QyHXJRtswh/aizuem0T7g/ugN9ahMlncNfU+8uOTiCq3YBobYBUj2wyltf53ltlRBkREIiBHwYYN6IqGbdRAAux44T349/bj11ensHr+JFQqAxILYiZWjlFiLREBkTZkNmtoaYPIUQiCED3PHkN6eA9+Of4ufp85BpXphG7UoYMGOa0WmIiUw4A2gq72NtPx+CHkBnZKTxOSPXAYyb48NhZ/Qnn+Q+waenjLpRUkFOnNRDYeBAFUzPMkCEOMPvpIOPD865yLs+nPQZc78gjqLSAbwZ06CsTTgImgjUVvdzb67NvvY2drNVJB0KR0KomZ2XNJdXHI6R17GdufHsPyzOf4udQGbMvB//QVxMrLsLEUIBakWzbZdzcPvDgiTMwiInC9OGStBA5qUEojU13GtktT4HQnGgfegJvpQsIRxBNJKKXEdV2AWdga7UBEBAAcF5zMQPkK4vci9scC/AsvIcoNYmX0LRg3BTF661zWitWRo7yO7grFPBIdgeMpVBfO4/rbZVSLC0B7F1JLZwGjEXXdA+33wSsvwVgrFPMo1tGzrvr2YK5032M3NhYv50RHeu3KGVq98DHYi4PjSWgDJH78BAkTQWJtiMgR0k2VHhyu3v5Ex6x6h6h88Ad5ih33o8p3s71WRyBHAdZCrN2KiRkAAVaDXRf+7tEb+WeOjp8gKlGhIDw9TXZCJHf9m/r+1sqfWUAB1v4vZzALoOFlb1vbPpw+d4KoVCgI/wOLWZJSyhb/iAAAAABJRU5ErkJggg=="
@@ -470,6 +489,11 @@ class App:
         self.refresh_windows()
         self.tick()
 
+        # vérification des mises à jour GitHub (2 s après le démarrage,
+        # en arrière-plan, silencieuse si pas d'internet)
+        if self.cfg.get("auto_update", True):
+            self.root.after(2000, self.check_updates_async)
+
         # clic sur l'icône de la barre des tâches (réduction) -> zone de notif
         self.root.bind("<Unmap>", self.on_unmap)
 
@@ -506,7 +530,7 @@ class App:
     # ---------------- config ----------------
     def load_config(self):
         cfg = {"hk_next": "F1", "hk_prev": "F2", "topmost": True, "order": [],
-               "notify_session": True, "direct_mod": "Alt"}
+               "notify_session": True, "direct_mod": "Alt", "auto_update": True}
         try:
             with open(config_path(), "r", encoding="utf-8") as f:
                 cfg.update(json.load(f))
@@ -728,6 +752,64 @@ class App:
             self.lbl_timer.config(text="")
         self.root.after(1000, self.update_timer)
 
+    # ---------------- mise à jour automatique (GitHub) ----------------
+    def check_updates_async(self, manual=False):
+        threading.Thread(target=self._check_updates, args=(manual,),
+                         daemon=True).start()
+
+    def _check_updates(self, manual):
+        try:
+            req = urllib.request.Request(
+                UPDATE_URL, headers={"User-Agent": "KaliOrganizer",
+                                     "Cache-Control": "no-cache"})
+            data = urllib.request.urlopen(req, timeout=10).read().decode("utf-8")
+            remote_v = parse_remote_version(data)
+            if not remote_v:
+                raise ValueError("version distante introuvable")
+            if version_tuple(remote_v) > version_tuple(APP_VERSION):
+                # sécurité : on vérifie que le fichier téléchargé est un
+                # programme Python valide avant de l'installer
+                compile(data, "app.py", "exec")
+                path = os.path.join(os.path.dirname(config_path()), "app.py")
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(data)
+                self.root.after(0, self._update_done, remote_v)
+            elif manual:
+                self.root.after(0, lambda: messagebox.showinfo(
+                    APP_TITLE, f"Tu es à jour (v{APP_VERSION})."))
+        except Exception:
+            if manual:
+                self.root.after(0, lambda: messagebox.showinfo(
+                    APP_TITLE,
+                    "Impossible de vérifier les mises à jour.\n"
+                    "Vérifie ta connexion internet."))
+
+    def _update_done(self, new_version):
+        messagebox.showinfo(
+            APP_TITLE,
+            f"Mise à jour v{new_version} installée !\n\n"
+            "KaliOrganizer va redémarrer pour l'appliquer.")
+        self.restart_app()
+
+    def restart_app(self):
+        self.save_config()
+        # retire l'icône de la zone de notification
+        try:
+            self.tray.hide()
+        except Exception:
+            pass
+        # libère le verrou d'instance unique pour la nouvelle instance
+        try:
+            if MUTEX_HANDLE:
+                kernel32.CloseHandle(MUTEX_HANDLE)
+        except Exception:
+            pass
+        if getattr(sys, "frozen", False):
+            subprocess.Popen([sys.executable])
+        else:
+            subprocess.Popen([sys.executable, sys.argv[0]])
+        os._exit(0)
+
     # ---------------- menu options ----------------
     def build_options_menu(self):
         self.var_notify = tk.BooleanVar(value=self.cfg.get("notify_session", True))
@@ -749,6 +831,14 @@ class App:
                                command=lambda mo=mode: self.set_direct_mod(mo),
                                selectcolor=C_ACCENT)
         m.add_cascade(label="Accès direct aux persos", menu=sm)
+        # mises à jour
+        self.var_autoupd = tk.BooleanVar(value=self.cfg.get("auto_update", True))
+        m.add_checkbutton(label="Mises à jour automatiques",
+                          variable=self.var_autoupd,
+                          command=self.on_toggle_autoupd,
+                          selectcolor=C_ACCENT)
+        m.add_command(label="Vérifier les mises à jour",
+                      command=lambda: self.check_updates_async(manual=True))
         m.add_separator()
         m.add_command(label="Ouvrir le dossier des mises à jour",
                       command=self.open_update_folder)
@@ -759,6 +849,10 @@ class App:
 
     def on_toggle_notify(self):
         self.cfg["notify_session"] = self.var_notify.get()
+        self.save_config()
+
+    def on_toggle_autoupd(self):
+        self.cfg["auto_update"] = self.var_autoupd.get()
         self.save_config()
 
     def open_update_folder(self):
@@ -1072,11 +1166,15 @@ class App:
         self.root.mainloop()
 
 
+MUTEX_HANDLE = None
+
+
 def already_running():
     """Verrou système : True si une instance de KaliOrganizer tourne déjà."""
+    global MUTEX_HANDLE
     kernel32.SetLastError(0)
-    # le handle du mutex reste ouvert toute la vie du processus (volontaire)
-    kernel32.CreateMutexW(None, False, "KaliOrganizer_Instance_Unique")
+    MUTEX_HANDLE = kernel32.CreateMutexW(None, False,
+                                         "KaliOrganizer_Instance_Unique")
     return kernel32.GetLastError() == 183  # ERROR_ALREADY_EXISTS
 
 
