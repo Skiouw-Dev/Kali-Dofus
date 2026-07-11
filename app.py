@@ -93,7 +93,7 @@ VK_CODES = {
 }
 
 APP_TITLE = "Kali"
-APP_VERSION = "2.4"
+APP_VERSION = "2.5"
 
 # Style par classe : (glyphe d'arme stylisé, couleur) — dessins génériques,
 # aucune ressource Ankama. Détecté depuis le titre "Nom - Classe - ...".
@@ -119,6 +119,36 @@ CLASS_STYLE = {
     "forgelance": ("\u2699", "#8a9ab8"),   # lance
 }
 CLASS_DEFAULT = ("\u25c6", "#6f7276")
+
+# Icônes de classes officielles (optionnelles) : déposer des PNG nommés
+# iop.png, cra.png, eniripsa.png... dans %APPDATA%\Kali\icons
+# Kali les utilise si présentes, sinon retombe sur les glyphes ci-dessus.
+_ICON_CACHE = {}
+
+
+def icons_dir():
+    d = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")),
+                     APP_TITLE, "icons")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def load_class_icon(cls):
+    """PhotoImage de la classe (réduite à ~22px), ou None si absente."""
+    if cls in _ICON_CACHE:
+        return _ICON_CACHE[cls]
+    img = None
+    path = os.path.join(icons_dir(), cls + ".png")
+    if os.path.exists(path):
+        try:
+            img = tk.PhotoImage(file=path)
+            f = max(1, (max(img.width(), img.height()) + 21) // 22)
+            if f > 1:
+                img = img.subsample(f, f)
+        except Exception:
+            img = None
+    _ICON_CACHE[cls] = img
+    return img
 
 
 def normalize_class(txt):
@@ -759,28 +789,35 @@ class App:
         for w in self.mb.winfo_children():
             w.destroy()
         # poignée de déplacement
-        grip = tk.Label(self.mb, text="\u22ee\u22ee", bg=C_BG, fg=C_TEXT_2,
-                        font=("Segoe UI", 9), padx=4, cursor="fleur")
+        grip = tk.Label(self.mb, text="\u22ee", bg=C_BG, fg=C_TEXT_2,
+                        font=("Segoe UI", 9), padx=2, cursor="fleur")
         grip.pack(side="left", fill="y")
         for wdg in (grip, self.mb):
             wdg.bind("<ButtonPress-1>", self.mb_press)
             wdg.bind("<B1-Motion>", self.mb_drag)
             wdg.bind("<ButtonRelease-1>", self.mb_release)
-        # une case par perso, dans l'ordre d'initiative
+        # une case par perso, dans l'ordre d'initiative (compact)
         for i, name in enumerate(self.order):
-            glyph, color = CLASS_STYLE.get(self.klass.get(name, ""),
-                                           CLASS_DEFAULT)
+            cls = self.klass.get(name, "")
+            glyph, color = CLASS_STYLE.get(cls, CLASS_DEFAULT)
             active = (i == self.current_index)
-            cell = tk.Label(self.mb,
-                            text=f"{glyph}\n{i + 1}",
-                            font=("Segoe UI", 10), justify="center",
-                            width=3, pady=2,
-                            bg=C_CARD_ACT if active else C_CARD,
-                            fg=color, cursor="hand2",
-                            highlightbackground=(C_ACCENT if active
-                                                 else C_STROKE),
-                            highlightthickness=1)
-            cell.pack(side="left", padx=2, pady=3)
+            icon = load_class_icon(cls) if cls else None
+            common = dict(bg=C_CARD_ACT if active else C_CARD,
+                          cursor="hand2",
+                          highlightbackground=(C_ACCENT if active
+                                               else C_STROKE),
+                          highlightthickness=1)
+            if icon is not None:
+                cell = tk.Label(self.mb, image=icon, text=str(i + 1),
+                                compound="top", font=("Segoe UI", 7),
+                                fg=C_ACCENT if active else C_TEXT_2,
+                                padx=2, pady=1, **common)
+                cell._img = icon  # référence anti garbage-collector
+            else:
+                cell = tk.Label(self.mb, text=f"{glyph}\n{i + 1}",
+                                font=("Segoe UI", 9), justify="center",
+                                width=2, pady=1, fg=color, **common)
+            cell.pack(side="left", padx=1, pady=2)
             cell.bind("<Button-1>", lambda e, i=i: self.go_to(i))
             cell.bind("<Enter>", lambda e, c=cell, a=active:
                       c.configure(bg=C_CARD_HOV if not a else C_CARD_ACT))
@@ -788,7 +825,7 @@ class App:
                       c.configure(bg=C_CARD if not a else C_CARD_ACT))
         # bouton : rouvrir la fenêtre principale
         btn = tk.Label(self.mb, text="\u25a3", bg=C_BG, fg=C_TEXT_2,
-                       font=("Segoe UI", 10), padx=6, cursor="hand2")
+                       font=("Segoe UI", 9), padx=3, cursor="hand2")
         btn.pack(side="left", fill="y")
         btn.bind("<Button-1>", lambda e: self.restore_from_tray())
         btn.bind("<Enter>", lambda e: btn.configure(fg=C_TEXT))
@@ -996,6 +1033,8 @@ class App:
         m.add_separator()
         m.add_command(label="Ouvrir le dossier des mises à jour",
                       command=self.open_update_folder)
+        m.add_command(label="Ouvrir le dossier des icônes de classes",
+                      command=lambda: os.startfile(icons_dir()))
         self.opt_menu = m
 
     def show_options(self, event):
