@@ -98,7 +98,7 @@ VK_CODES = {
 }
 
 APP_TITLE = "Kali"
-APP_VERSION = "2.9"
+APP_VERSION = "3.0"
 
 # Style par classe : (glyphe d'arme stylisé, couleur) — dessins génériques,
 # aucune ressource Ankama. Détecté depuis le titre "Nom - Classe - ...".
@@ -125,35 +125,94 @@ CLASS_STYLE = {
 }
 CLASS_DEFAULT = ("\u25c6", "#6f7276")
 
-# Icônes de classes officielles (optionnelles) : déposer des PNG nommés
-# iop.png, cra.png, eniripsa.png... dans %APPDATA%\Kali\icons
-# Kali les utilise si présentes, sinon retombe sur les glyphes ci-dessus.
-_ICON_CACHE = {}
+# Abréviations affichées quand aucune icône officielle n'est installée
+CLASS_ABBR = {
+    "feca": "Féca", "osamodas": "Osa", "enutrof": "Enu", "sram": "Sram",
+    "xelor": "Xel", "ecaflip": "Eca", "eniripsa": "Eni", "iop": "Iop",
+    "cra": "Crâ", "sadida": "Sadi", "sacrieur": "Sacri", "pandawa": "Panda",
+    "roublard": "Roub", "zobal": "Zobal", "steamer": "Stea",
+    "eliotrope": "Elio", "huppermage": "Hupp", "ouginak": "Ougi",
+    "forgelance": "Forge",
+}
+
+# ---------------------------------------------------------------------------
+# Icônes des jetons : capturées directement sur les fenêtres Dofus.
+# Chaque fenêtre du jeu porte l'icône de sa classe -> on la lit via l'API
+# Windows et on la convertit en image tkinter. Zéro fichier, zéro dépendance.
+# ---------------------------------------------------------------------------
+gdi32 = ctypes.windll.gdi32
+_WICON_CACHE = {}
 
 
-def icons_dir():
-    d = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")),
-                     APP_TITLE, "icons")
-    os.makedirs(d, exist_ok=True)
-    return d
+class BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [
+        ("biSize", wt.DWORD), ("biWidth", ctypes.c_long),
+        ("biHeight", ctypes.c_long), ("biPlanes", wt.WORD),
+        ("biBitCount", wt.WORD), ("biCompression", wt.DWORD),
+        ("biSizeImage", wt.DWORD), ("biXPelsPerMeter", ctypes.c_long),
+        ("biYPelsPerMeter", ctypes.c_long), ("biClrUsed", wt.DWORD),
+        ("biClrImportant", wt.DWORD),
+    ]
 
 
-def load_class_icon(cls, size=22):
-    """PhotoImage de la classe (réduite à ~size px), ou None si absente."""
-    key = (cls, size)
-    if key in _ICON_CACHE:
-        return _ICON_CACHE[key]
+def get_window_hicon(hwnd):
+    """Récupère le handle de l'icône de la fenêtre (sans bloquer)."""
+    res = wt.DWORD()
+    for wparam in (2, 1, 0):  # ICON_SMALL2, ICON_BIG, ICON_SMALL
+        if user32.SendMessageTimeoutW(hwnd, 0x7F, wparam, 0,
+                                      0x2, 200, ctypes.byref(res)) and res.value:
+            return res.value
+    get_cls = getattr(user32, "GetClassLongPtrW", user32.GetClassLongW)
+    return get_cls(hwnd, -14) or get_cls(hwnd, -34)  # GCLP_HICON / HICONSM
+
+
+def window_icon_image(hwnd, size, bg="#16161e"):
+    """PhotoImage de l'icône de la fenêtre, dessinée sur fond `bg`.
+    Retourne None si la fenêtre n'a pas d'icône exploitable."""
+    key = (hwnd, size)
+    if key in _WICON_CACHE:
+        return _WICON_CACHE[key]
     img = None
-    path = os.path.join(icons_dir(), cls + ".png")
-    if os.path.exists(path):
-        try:
-            img = tk.PhotoImage(file=path)
-            f = max(1, (max(img.width(), img.height()) + size - 1) // size)
-            if f > 1:
-                img = img.subsample(f, f)
-        except Exception:
-            img = None
-    _ICON_CACHE[key] = img
+    try:
+        hicon = get_window_hicon(hwnd)
+        if hicon:
+            hdc = user32.GetDC(0)
+            mem = gdi32.CreateCompatibleDC(hdc)
+            bmi = BITMAPINFOHEADER()
+            bmi.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+            bmi.biWidth, bmi.biHeight = size, -size  # top-down
+            bmi.biPlanes, bmi.biBitCount = 1, 32
+            bits = ctypes.c_void_p()
+            hbmp = gdi32.CreateDIBSection(mem, ctypes.byref(bmi), 0,
+                                          ctypes.byref(bits), None, 0)
+            old = gdi32.SelectObject(mem, hbmp)
+            # pré-remplit avec la couleur du jeton (gère la transparence)
+            r, g, b = (int(bg[i:i + 2], 16) for i in (1, 3, 5))
+            brush = gdi32.CreateSolidBrush((b << 16) | (g << 8) | r)
+            rect = (ctypes.c_long * 4)(0, 0, size, size)
+            user32.FillRect(mem, ctypes.byref(rect), brush)
+            gdi32.DeleteObject(brush)
+            # dessine l'icône par-dessus (mise à l'échelle par Windows)
+            user32.DrawIconEx(mem, 0, 0, hicon, size, size, 0, None, 3)
+            raw = ctypes.string_at(bits.value, size * size * 4)  # BGRA
+            gdi32.SelectObject(mem, old)
+            gdi32.DeleteObject(hbmp)
+            gdi32.DeleteDC(mem)
+            user32.ReleaseDC(0, hdc)
+            # construit l'image tkinter ligne par ligne
+            rows = []
+            for y in range(size):
+                row = []
+                base = y * size * 4
+                for x in range(size):
+                    o = base + x * 4
+                    row.append(f"#{raw[o+2]:02x}{raw[o+1]:02x}{raw[o]:02x}")
+                rows.append("{" + " ".join(row) + "}")
+            img = tk.PhotoImage(width=size, height=size)
+            img.put(" ".join(rows))
+    except Exception:
+        img = None
+    _WICON_CACHE[key] = img
     return img
 
 
@@ -833,12 +892,19 @@ class App:
                           fill="#16161e", outline=color,
                           width=3 if active else 2, tags=tag)
 
-            icon = load_class_icon(cls, size=int(R * 1.65)) if cls else None
+            hwnd = self.windows.get(name)
+            icon = window_icon_image(hwnd, int(R * 1.7)) if hwnd else None
+            drawn = False
             if icon is not None:
-                c.create_image(cx, cy, image=icon, tags=tag)
-            else:
-                c.create_text(cx, cy, text=glyph, fill="#ffffff",
-                              font=("Segoe UI", 14), tags=tag)
+                try:
+                    c.create_image(cx, cy, image=icon, tags=tag)
+                    drawn = True
+                except Exception:
+                    pass
+            if not drawn:
+                abbr = CLASS_ABBR.get(cls, "?")
+                c.create_text(cx, cy, text=abbr, fill=color,
+                              font=("Segoe UI", 8, "bold"), tags=tag)
 
             # badge numéro (petit disque en bas à droite du jeton)
             bx, by = cx + R - 5, cy + R - 5
@@ -1120,8 +1186,6 @@ class App:
         m.add_separator()
         m.add_command(label="Ouvrir le dossier des mises à jour",
                       command=self.open_update_folder)
-        m.add_command(label="Ouvrir le dossier des icônes de classes",
-                      command=lambda: os.startfile(icons_dir()))
         self.opt_menu = m
 
     def show_options(self, event):
