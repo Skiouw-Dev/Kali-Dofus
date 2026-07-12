@@ -93,7 +93,7 @@ VK_CODES = {
 }
 
 APP_TITLE = "Kali"
-APP_VERSION = "2.6"
+APP_VERSION = "2.7.1"
 
 # Style par classe : (glyphe d'arme stylisé, couleur) — dessins génériques,
 # aucune ressource Ankama. Détecté depuis le titre "Nom - Classe - ...".
@@ -753,6 +753,11 @@ class App:
         self.show_minibar()
 
     # ---------------- mini-barre flottante (mode réduit) ----------------
+    MB_R = 15        # rayon des pastilles
+    MB_GAP = 8       # espace entre pastilles
+    MB_PAD = 12      # marge intérieure de la capsule
+    MB_H = 52        # hauteur totale
+
     def show_minibar(self):
         if not self.cfg.get("minibar", True):
             return
@@ -760,19 +765,25 @@ class App:
         mb = tk.Toplevel(self.root)
         mb.overrideredirect(True)
         mb.attributes("-topmost", True)
-        mb.configure(bg=C_BG, highlightbackground=C_STROKE,
-                     highlightthickness=1)
+        # transparence : tout ce qui est de cette couleur devient invisible
+        self._mb_trans = "#010203"
+        try:
+            mb.attributes("-transparentcolor", self._mb_trans)
+        except Exception:
+            self._mb_trans = C_BG
+        self.mb_canvas = tk.Canvas(mb, bg=self._mb_trans, bd=0,
+                                   highlightthickness=0, height=self.MB_H)
+        self.mb_canvas.pack()
         self.mb = mb
         self.fill_minibar()
-        # position mémorisée, sinon coin bas-droit au-dessus de la barre
         pos = self.cfg.get("minibar_pos")
         mb.update_idletasks()
-        w, h = mb.winfo_reqwidth(), mb.winfo_reqheight()
+        w = self.mb_canvas.winfo_reqwidth()
         sw, sh = mb.winfo_screenwidth(), mb.winfo_screenheight()
         if pos and 0 <= pos[0] <= sw - 40 and 0 <= pos[1] <= sh - 40:
             x, y = pos
         else:
-            x, y = sw - w - 16, sh - h - 60
+            x, y = sw - w - 16, sh - self.MB_H - 64
         mb.geometry(f"+{x}+{y}")
 
     def hide_minibar(self):
@@ -786,50 +797,87 @@ class App:
     def fill_minibar(self):
         if self.mb is None:
             return
-        for w in self.mb.winfo_children():
-            w.destroy()
-        # poignée de déplacement
-        grip = tk.Label(self.mb, text="\u22ee", bg=C_BG, fg=C_TEXT_2,
-                        font=("Segoe UI", 9), padx=2, cursor="fleur")
-        grip.pack(side="left", fill="y")
-        for wdg in (grip, self.mb):
-            wdg.bind("<ButtonPress-1>", self.mb_press)
-            wdg.bind("<B1-Motion>", self.mb_drag)
-            wdg.bind("<ButtonRelease-1>", self.mb_release)
-        # une case par perso, dans l'ordre d'initiative (compact)
+        c = self.mb_canvas
+        c.delete("all")
+        n = len(self.order)
+        R, GAP, PAD = self.MB_R, self.MB_GAP, self.MB_PAD
+        cell = 2 * R + GAP
+        w = PAD * 2 + max(1, n) * cell - GAP + 26  # +26 : bouton restaurer
+        h = self.MB_H
+        c.configure(width=w)
+
+        # capsule de fond arrondie
+        rad = h // 2 - 4
+        x0, y0, x1, y1 = 2, 4, w - 2, h - 4
+        c.create_oval(x0, y0, x0 + 2 * rad, y1, fill=C_BG, outline=C_STROKE)
+        c.create_oval(x1 - 2 * rad, y0, x1, y1, fill=C_BG, outline=C_STROKE)
+        c.create_rectangle(x0 + rad, y0, x1 - rad, y1, fill=C_BG, outline=C_BG)
+        c.create_line(x0 + rad, y0, x1 - rad, y0, fill=C_STROKE)
+        c.create_line(x0 + rad, y1, x1 - rad, y1, fill=C_STROKE)
+        c.tag_bind("all", "<ButtonPress-1>", self.mb_press)
+
+        cy = h // 2
         for i, name in enumerate(self.order):
+            cx = PAD + R + i * cell
             cls = self.klass.get(name, "")
             glyph, color = CLASS_STYLE.get(cls, CLASS_DEFAULT)
             active = (i == self.current_index)
+            tag = f"mb{i}"
+            # anneau actif lumineux
+            if active:
+                c.create_oval(cx - R - 3, cy - R - 3, cx + R + 3, cy + R + 3,
+                              outline=C_ACCENT, width=2, tags=tag)
+            # pastille
+            c.create_oval(cx - R, cy - R, cx + R, cy + R,
+                          fill=self._mb_shade(color, active),
+                          outline=color, width=1, tags=tag)
+            # icône officielle si dispo, sinon glyphe
             icon = load_class_icon(cls) if cls else None
-            common = dict(bg=C_CARD_ACT if active else C_CARD,
-                          cursor="hand2",
-                          highlightbackground=(C_ACCENT if active
-                                               else C_STROKE),
-                          highlightthickness=1)
             if icon is not None:
-                cell = tk.Label(self.mb, image=icon, text=str(i + 1),
-                                compound="top", font=("Segoe UI", 7),
-                                fg=C_ACCENT if active else C_TEXT_2,
-                                padx=2, pady=1, **common)
-                cell._img = icon  # référence anti garbage-collector
+                c.create_image(cx, cy, image=icon, tags=tag)
             else:
-                cell = tk.Label(self.mb, text=f"{glyph}\n{i + 1}",
-                                font=("Segoe UI", 9), justify="center",
-                                width=2, pady=1, fg=color, **common)
-            cell.pack(side="left", padx=1, pady=2)
-            cell.bind("<Button-1>", lambda e, i=i: self.go_to(i))
-            cell.bind("<Enter>", lambda e, c=cell, a=active:
-                      c.configure(bg=C_CARD_HOV if not a else C_CARD_ACT))
-            cell.bind("<Leave>", lambda e, c=cell, a=active:
-                      c.configure(bg=C_CARD if not a else C_CARD_ACT))
-        # bouton : rouvrir la fenêtre principale
-        btn = tk.Label(self.mb, text="\u25a3", bg=C_BG, fg=C_TEXT_2,
-                       font=("Segoe UI", 9), padx=3, cursor="hand2")
-        btn.pack(side="left", fill="y")
-        btn.bind("<Button-1>", lambda e: self.restore_from_tray())
-        btn.bind("<Enter>", lambda e: btn.configure(fg=C_TEXT))
-        btn.bind("<Leave>", lambda e: btn.configure(fg=C_TEXT_2))
+                c.create_text(cx, cy, text=glyph, fill="#ffffff",
+                              font=("Segoe UI", 11), tags=tag)
+            # numéro d'ordre discret
+            c.create_text(cx + R - 3, cy + R - 3, text=str(i + 1),
+                          fill=C_ACCENT if active else C_TEXT_2,
+                          font=("Segoe UI", 7, "bold"), tags=tag)
+            # point indicateur sous le perso actif
+            if active:
+                c.create_oval(cx - 2, y1 - 6, cx + 2, y1 - 2,
+                              fill=C_ACCENT, outline=C_ACCENT)
+            c.tag_bind(tag, "<Button-1>", lambda e, i=i: self.go_to(i))
+            c.tag_bind(tag, "<Enter>",
+                       lambda e: c.configure(cursor="hand2"))
+            c.tag_bind(tag, "<Leave>",
+                       lambda e: c.configure(cursor=""))
+
+        # bouton restaurer (petit chevron dans un rond discret)
+        bx = w - PAD - 6
+        c.create_oval(bx - 9, cy - 9, bx + 9, cy + 9, fill=C_CARD,
+                      outline=C_STROKE, tags="mbrestore")
+        c.create_text(bx, cy, text="\u25a3", fill=C_TEXT_2,
+                      font=("Segoe UI", 8), tags="mbrestore")
+        c.tag_bind("mbrestore", "<Button-1>",
+                   lambda e: self.restore_from_tray())
+        c.tag_bind("mbrestore", "<Enter>",
+                   lambda e: c.configure(cursor="hand2"))
+        c.tag_bind("mbrestore", "<Leave>",
+                   lambda e: c.configure(cursor=""))
+
+        # déplacement : cliquer-glisser le fond de la capsule
+        c.bind("<ButtonPress-1>", self.mb_press)
+        c.bind("<B1-Motion>", self.mb_drag)
+        c.bind("<ButtonRelease-1>", self.mb_release)
+
+    @staticmethod
+    def _mb_shade(hex_color, active):
+        """Version assombrie de la couleur de classe pour le fond."""
+        r = int(hex_color[1:3], 16)
+        g = int(hex_color[3:5], 16)
+        b = int(hex_color[5:7], 16)
+        f = 0.42 if active else 0.28
+        return f"#{int(r * f):02x}{int(g * f):02x}{int(b * f):02x}"
 
     def mb_press(self, event):
         self._mb_drag = (event.x_root - self.mb.winfo_x(),
@@ -994,7 +1042,19 @@ class App:
         except Exception:
             pass
         if getattr(sys, "frozen", False):
-            subprocess.Popen([sys.executable])
+            # Relance DIFFÉRÉE (~1 s) : laisse l'ancienne instance nettoyer
+            # son dossier temporaire _MEI avant que la nouvelle ne démarre
+            # (sinon Windows affiche "Failed to remove temporary directory").
+            env = os.environ.copy()
+            for k in list(env):
+                if k.startswith("_PYI") or k == "_MEIPASS2":
+                    env.pop(k, None)
+            CREATE_NO_WINDOW = 0x08000000
+            subprocess.Popen(
+                ["cmd", "/c",
+                 f'ping -n 2 127.0.0.1 >nul & start "" "{sys.executable}"'],
+                env=env, cwd=os.path.expanduser("~"),
+                creationflags=CREATE_NO_WINDOW)
         else:
             subprocess.Popen([sys.executable, sys.argv[0]])
         os._exit(0)
