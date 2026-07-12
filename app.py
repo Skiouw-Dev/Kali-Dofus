@@ -29,7 +29,12 @@ from tkinter import font as tkfont
 from tkinter import messagebox
 
 # --- Mise à jour automatique via GitHub ---
-UPDATE_URL = "https://raw.githubusercontent.com/Skiiouw/Kali-Dofus/main/app.py"
+# Le compte a été renommé Skiiouw -> Skiouw-Dev : on essaie la nouvelle
+# adresse en premier, l'ancienne en secours (redirection éventuelle).
+UPDATE_URLS = [
+    "https://raw.githubusercontent.com/Skiouw-Dev/Kali-Dofus/main/app.py",
+    "https://raw.githubusercontent.com/Skiiouw/Kali-Dofus/main/app.py",
+]
 
 
 def parse_remote_version(source):
@@ -93,7 +98,7 @@ VK_CODES = {
 }
 
 APP_TITLE = "Kali"
-APP_VERSION = "2.7"
+APP_VERSION = "2.8"
 
 # Style par classe : (glyphe d'arme stylisé, couleur) — dessins génériques,
 # aucune ressource Ankama. Détecté depuis le titre "Nom - Classe - ...".
@@ -996,10 +1001,19 @@ class App:
 
     def _check_updates(self, manual):
         try:
-            req = urllib.request.Request(
-                UPDATE_URL, headers={"User-Agent": "Kali",
-                                     "Cache-Control": "no-cache"})
-            data = urllib.request.urlopen(req, timeout=10).read().decode("utf-8")
+            data = None
+            for url in UPDATE_URLS:
+                try:
+                    req = urllib.request.Request(
+                        url, headers={"User-Agent": "Kali",
+                                      "Cache-Control": "no-cache"})
+                    data = urllib.request.urlopen(
+                        req, timeout=10).read().decode("utf-8")
+                    break
+                except Exception:
+                    continue
+            if data is None:
+                raise OSError("aucune adresse de mise à jour joignable")
             remote_v = parse_remote_version(data)
             if not remote_v:
                 raise ValueError("version distante introuvable")
@@ -1042,7 +1056,19 @@ class App:
         except Exception:
             pass
         if getattr(sys, "frozen", False):
-            subprocess.Popen([sys.executable])
+            # Relance DIFFÉRÉE (~1 s) : laisse l'ancienne instance nettoyer
+            # son dossier temporaire _MEI avant que la nouvelle ne démarre
+            # (sinon Windows affiche "Failed to remove temporary directory").
+            env = os.environ.copy()
+            for k in list(env):
+                if k.startswith("_PYI") or k == "_MEIPASS2":
+                    env.pop(k, None)
+            CREATE_NO_WINDOW = 0x08000000
+            subprocess.Popen(
+                ["cmd", "/c",
+                 f'ping -n 2 127.0.0.1 >nul & start "" "{sys.executable}"'],
+                env=env, cwd=os.path.expanduser("~"),
+                creationflags=CREATE_NO_WINDOW)
         else:
             subprocess.Popen([sys.executable, sys.argv[0]])
         os._exit(0)
