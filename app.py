@@ -93,7 +93,7 @@ VK_CODES = {
 }
 
 APP_TITLE = "Kali"
-APP_VERSION = "2.5"
+APP_VERSION = "2.6"
 
 # Style par classe : (glyphe d'arme stylisé, couleur) — dessins génériques,
 # aucune ressource Ankama. Détecté depuis le titre "Nom - Classe - ...".
@@ -596,7 +596,7 @@ class App:
     def load_config(self):
         cfg = {"hk_next": "F1", "hk_prev": "F2", "topmost": True, "order": [],
                "notify_session": True, "direct_mod": "Alt", "auto_update": True, "break_reminder": True,
-               "minibar": True}
+               "minibar": True, "auto_focus_first": True}
         try:
             with open(config_path(), "r", encoding="utf-8") as f:
                 cfg.update(json.load(f))
@@ -900,6 +900,11 @@ class App:
         n_open = len(self.windows)
         if n_open > 0 and self.session_start is None:
             self.session_start = time.time()
+            # focus automatique du perso n°1 de l'ordre d'initiative
+            # (léger délai : laisse la fenêtre du jeu finir de s'afficher)
+            if self.cfg.get("auto_focus_first", True) and self.order:
+                self.root.after(800, lambda: self.go_to(0)
+                                if self.order and self.session_start else None)
         elif n_open == 0 and self.session_start is not None:
             elapsed = time.time() - self.session_start
             self.session_start = None
@@ -1006,6 +1011,12 @@ class App:
                           variable=self.var_notify,
                           command=self.on_toggle_notify,
                           selectcolor=C_ACCENT)
+        self.var_focus1 = tk.BooleanVar(
+            value=self.cfg.get("auto_focus_first", True))
+        m.add_checkbutton(label="Focus auto du perso n\u00b01",
+                          variable=self.var_focus1,
+                          command=self.on_toggle_focus1,
+                          selectcolor=C_ACCENT)
         self.var_minibar = tk.BooleanVar(value=self.cfg.get("minibar", True))
         m.add_checkbutton(label="Mini-barre en mode réduit",
                           variable=self.var_minibar,
@@ -1045,6 +1056,10 @@ class App:
         state = self.var_notify.get()
         self.cfg["notify_session"] = state
         self.cfg["break_reminder"] = state
+        self.save_config()
+
+    def on_toggle_focus1(self):
+        self.cfg["auto_focus_first"] = self.var_focus1.get()
         self.save_config()
 
     def on_toggle_minibar(self):
