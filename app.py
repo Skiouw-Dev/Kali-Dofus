@@ -99,7 +99,7 @@ VK_CODES = {
 }
 
 APP_TITLE = "Kali"
-APP_VERSION = "3.8"
+APP_VERSION = "3.9"
 
 # Style par classe : (glyphe d'arme stylisé, couleur) — dessins génériques,
 # aucune ressource Ankama. Détecté depuis le titre "Nom - Classe - ...".
@@ -909,9 +909,9 @@ class App:
             return
         mb = tk.Toplevel(self.root)
         mb.overrideredirect(True)
-        # PAS de 'topmost' : la mini-barre se comporte comme une fenêtre
-        # normale (recouvrable). watch_foreground la remonte au-dessus de
-        # Dofus quand le jeu est actif.
+        # toujours au premier plan : la mini-barre reste visible par-dessus
+        # Dofus ET les autres applications, en permanence quand Kali est réduit
+        mb.attributes("-topmost", True)
         self._mb_trans = "#010203"
         try:
             mb.attributes("-transparentcolor", self._mb_trans)
@@ -1712,30 +1712,21 @@ class App:
         self.root.after(3000, self.tick)
 
     def watch_foreground(self):
-        """Kali réduit : la mini-barre est TOUJOURS affichée mais se comporte
-        comme une fenêtre normale (pas 'topmost'). Quand une fenêtre Dofus
-        passe au premier plan, on replace la mini-barre juste au-dessus d'elle
-        pour qu'elle reste visible ; sinon une autre appli la recouvre."""
+        """Kali réduit : la mini-barre reste TOUJOURS visible au premier plan.
+        On la maintient affichée et au-dessus (certains plein-écran exclusifs
+        peuvent la masquer un instant ; on la ré-épingle en continu)."""
         try:
             if self.minimized and self.cfg.get("minibar", True):
-                self.show_minibar()          # garantit qu'elle existe/visible
-                fg = GetForegroundWindow()
-                on_dofus = fg in self.windows.values()
-                # sur Dofus : placer la mini-barre juste AU-DESSUS de la
-                # fenêtre Dofus active (et non au-dessus de tout)
-                if on_dofus and self.mb is not None:
+                self.show_minibar()
+                if self.mb is not None:
                     try:
-                        mbid = int(self.mb.winfo_id())
-                        SWP = 0x0010 | 0x0002 | 0x0001  # NOACTIVATE|NOMOVE|NOSIZE
-                        user32.SetWindowPos(mbid, fg, 0, 0, 0, 0, SWP)
+                        self.mb.attributes("-topmost", True)
+                        self.mb.lift()
                     except Exception:
-                        try:
-                            self.mb.lift()
-                        except Exception:
-                            pass
+                        pass
         except Exception:
             pass
-        self.root.after(200, self.watch_foreground)
+        self.root.after(500, self.watch_foreground)
 
     def on_close(self):
         try:
