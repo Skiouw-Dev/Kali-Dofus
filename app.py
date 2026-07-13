@@ -99,7 +99,7 @@ VK_CODES = {
 }
 
 APP_TITLE = "Kali"
-APP_VERSION = "4.0"
+APP_VERSION = "4.1"
 
 # Style par classe : (glyphe d'arme stylisé, couleur) — dessins génériques,
 # aucune ressource Ankama. Détecté depuis le titre "Nom - Classe - ...".
@@ -231,6 +231,54 @@ def window_icon_pil(hwnd, size):
 
 
 _TOKEN_CACHE = {}
+_LOCK_CACHE = {}
+
+
+def make_lock_icon(size, locked, color):
+    """Dessine un petit cadenas net (Pillow), ouvert ou fermé.
+    Retourne un ImageTk.PhotoImage, ou None si Pillow absent."""
+    if not PIL_OK:
+        return None
+    key = (size, locked, color)
+    if key in _LOCK_CACHE:
+        return _LOCK_CACHE[key]
+    SS = 4
+    N = size * SS
+    im = Image.new("RGBA", (N, N), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    col = tuple(int(color[i:i+2], 16) for i in (1, 3, 5)) + (255,)
+    # corps du cadenas (rectangle arrondi dans la moitié basse)
+    bw, bh = N * 0.60, N * 0.42
+    bx = (N - bw) / 2
+    by = N * 0.48
+    d.rounded_rectangle((bx, by, bx + bw, by + bh),
+                        radius=N * 0.09, fill=col)
+    # anse (arc en U inversé au-dessus du corps)
+    aw = bw * 0.62
+    ax = (N - aw) / 2
+    ay_top = N * 0.18
+    lw = max(2, int(N * 0.10))
+    if locked:
+        # anse fermée : U symétrique qui rejoint le corps
+        d.arc((ax, ay_top, ax + aw, by + lw), start=180, end=360,
+              fill=col, width=lw)
+        d.line((ax, (ay_top + by) / 2, ax, by), fill=col, width=lw)
+        d.line((ax + aw, (ay_top + by) / 2, ax + aw, by), fill=col, width=lw)
+    else:
+        # anse ouverte : soulevée et un seul montant redescend
+        ax2 = ax + aw * 0.28
+        d.arc((ax2, ay_top - N * 0.06, ax2 + aw, by - N * 0.04),
+              start=180, end=360, fill=col, width=lw)
+        d.line((ax2, (ay_top + by) / 2 - N * 0.05, ax2, by - N * 0.06),
+               fill=col, width=lw)
+    # trou de serrure
+    kr = N * 0.055
+    kx, ky = N / 2, by + bh * 0.44
+    d.ellipse((kx - kr, ky - kr, kx + kr, ky + kr), fill=(22, 22, 30, 255))
+    im = im.resize((size, size), Image.LANCZOS)
+    tk_img = ImageTk.PhotoImage(im)
+    _LOCK_CACHE[key] = tk_img
+    return tk_img
 
 
 def make_token_pil(hwnd, R, ring_hex, active, accent_hex="#4cc2ff",
@@ -1058,13 +1106,19 @@ class App:
         # bouton cadenas : verrouille/déverrouille le déplacement
         locked = self.cfg.get("minibar_locked", False)
         lx = w - 40
-        c.create_oval(lx - 10, cy - 10, lx + 10, cy + 10,
+        lock_col = C_ACCENT if locked else "#9a9a9a"
+        c.create_oval(lx - 11, cy - 11, lx + 11, cy + 11,
                       fill=C_CARD_ACT if locked else "#16161e",
                       outline=C_ACCENT if locked else C_STROKE,
                       tags="mblock")
-        c.create_text(lx, cy, text="\U0001f512" if locked else "\U0001f513",
-                      fill=C_ACCENT if locked else C_TEXT_2,
-                      font=("Segoe UI", 8), tags="mblock")
+        lock_img = make_lock_icon(15, locked, lock_col)
+        if lock_img is not None:
+            self._mb_imgs.append(lock_img)
+            c.create_image(lx, cy, image=lock_img, tags="mblock")
+        else:
+            c.create_text(lx, cy, text="L" if locked else "l",
+                          fill=lock_col, font=("Segoe UI", 9, "bold"),
+                          tags="mblock")
         c.tag_bind("mblock", "<ButtonPress-1>", self._mb_toggle_lock)
         c.tag_bind("mblock", "<Enter>",
                    lambda e: c.configure(cursor="hand2"))
@@ -1181,11 +1235,10 @@ class App:
         n_open = len(self.windows)
         if n_open > 0 and self.session_start is None:
             self.session_start = time.time()
-            # focus automatique du perso n°1 de l'ordre d'initiative
-            # (léger délai : laisse la fenêtre du jeu finir de s'afficher)
-            if self.cfg.get("auto_focus_first", True) and self.order:
-                self.root.after(800, lambda: self.go_to(0)
-                                if self.order and self.session_start else None)
+            # focus automatique du perso n°1 puis retour de Kali au 1er plan
+            if (self.cfg.get("auto_focus_first", True) and self.order
+                    and not self.minimized):
+                self.root.after(600, self._focus_first_then_raise)
         elif n_open == 0 and self.session_start is not None:
             elapsed = time.time() - self.session_start
             self.session_start = None
@@ -1615,6 +1668,34 @@ class App:
             self.go_to(index)  # simple clic = bascule sur la fenêtre
 
     # ---------------- navigation ----------------
+    def _focus_first_then_raise(self):
+        """Focus le perso n°1 (Dofus passe devant), puis ramène la fenêtre
+        principale de Kali au premier plan par-dessus."""
+        if not self.order or self.session_start is None:
+            return
+        self.go_to(0)
+        # après le focus du jeu, Kali reprend le premier plan
+        self.root.after(250, self._raise_self)
+
+    def _raise_self(self):
+        if self.minimized:
+            return
+        try:
+            self.root.deiconify()
+            self.root.lift()
+            self.root.attributes("-topmost", True)
+            self.root.after(400, lambda: self.root.attributes("-topmost", False))
+            hwnd = int(self.root.winfo_id())
+            # force le passage au premier plan via l'API Windows
+            try:
+                root_hwnd = GetAncestor(hwnd, 2)  # GA_ROOT
+            except Exception:
+                root_hwnd = hwnd
+            user32.ShowWindow(root_hwnd, 9)       # SW_RESTORE
+            user32.SetForegroundWindow(root_hwnd)
+        except Exception:
+            pass
+
     def go_to(self, index):
         if not self.order:
             return
