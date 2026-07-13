@@ -99,7 +99,7 @@ VK_CODES = {
 }
 
 APP_TITLE = "Kali"
-APP_VERSION = "3.5"
+APP_VERSION = "3.7"
 
 # Style par classe : (glyphe d'arme stylisé, couleur) — dessins génériques,
 # aucune ressource Ankama. Détecté depuis le titre "Nom - Classe - ...".
@@ -213,10 +213,14 @@ def window_icon_pil(hwnd, size):
         return None
     # BGRA -> RGBA
     img = Image.frombuffer("RGBA", (cap, cap), raw, "raw", "BGRA", 0, 1)
-    # certaines icônes ont un alpha nul partout (mal déclaré) : corrige
-    if img.getchannel("A").getbbox() is None:
+    # DrawIconEx laisse souvent un canal alpha inexploitable (tout ou
+    # partiellement nul), ce qui rendait le jeton transparent. Si l'alpha
+    # est quasi vide, on le remplace par une opacité pleine.
+    a = img.getchannel("A")
+    lo, hi = a.getextrema()
+    if hi < 16:                       # alpha globalement nul -> inexploitable
         img.putalpha(255)
-    # masque circulaire anti-aliasé (rendu 4x puis réduit)
+    # notre masque circulaire remplace de toute façon l'alpha au final
     big = size * 4
     img = img.resize((big, big), Image.LANCZOS)
     mask = Image.new("L", (big, big), 0)
@@ -728,7 +732,9 @@ class App:
     def load_config(self):
         cfg = {"hk_next": "F1", "hk_prev": "F2", "topmost": True, "order": [],
                "notify_session": True, "direct_mod": "Alt", "auto_update": True, "break_reminder": True,
-               "minibar": True, "auto_focus_first": True}
+               "minibar": True, "auto_focus_first": True,
+               "minibar_locked": False, "minibar_pos": None,
+               "minibar_dock": False}
         try:
             with open(config_path(), "r", encoding="utf-8") as f:
                 cfg.update(json.load(f))
@@ -921,6 +927,17 @@ class App:
         self.fill_minibar()
         self._place_minibar()
 
+    def _default_minibar_pos(self):
+        """Position par défaut, selon le mode d'ancrage."""
+        self.mb.update_idletasks()
+        w = self.mb_canvas.winfo_reqwidth()
+        sw = self.mb.winfo_screenwidth()
+        sh = self.mb.winfo_screenheight()
+        if self.cfg.get("minibar_dock", False):
+            # collée en bas de l'écran, centrée (le long de la barre des tâches)
+            return (sw - w) // 2, sh - self.MB_H - 2
+        return sw - w - 20, sh - self.MB_H - 70
+
     def _place_minibar(self):
         if self.mb is None:
             return
@@ -928,11 +945,25 @@ class App:
         w = self.mb_canvas.winfo_reqwidth()
         sw, sh = self.mb.winfo_screenwidth(), self.mb.winfo_screenheight()
         pos = self.cfg.get("minibar_pos")
-        if pos and 0 <= pos[0] <= sw - 40 and 0 <= pos[1] <= sh - 40:
+        # position valide seulement si entièrement visible à l'écran
+        if (pos and 0 <= pos[0] <= sw - w and 0 <= pos[1] <= sh - self.MB_H):
             x, y = pos
         else:
-            x, y = sw - w - 16, sh - self.MB_H - 64
+            x, y = self._default_minibar_pos()
         self.mb.geometry(f"+{x}+{y}")
+
+    def reset_minibar_position(self):
+        """Ramène la mini-barre au coin bas-droit (dépannage si perdue)."""
+        self.cfg["minibar_pos"] = None
+        self.save_config()
+        if self.mb is not None:
+            x, y = self._default_minibar_pos()
+            self.mb.geometry(f"+{x}+{y}")
+            self.mb.deiconify()
+            self.mb.lift()
+            self.mb_visible = True
+        else:
+            self.show_minibar()
 
     def show_minibar(self):
         """Affiche la mini-barre (création à la volée si besoin). Instantané.
@@ -1065,6 +1096,8 @@ class App:
         d = getattr(self, "_mb_drag", None)
         if not d:
             return
+        if self.cfg.get("minibar_locked", False):
+            return   # verrouillée : pas de déplacement, mais le clic marche
         if not d["moved"]:
             if (abs(event.x_root - d["x0"]) < 5
                     and abs(event.y_root - d["y0"]) < 5):
@@ -1283,6 +1316,20 @@ class App:
                           variable=self.var_minibar,
                           command=self.on_toggle_minibar,
                           selectcolor=C_ACCENT)
+        self.var_mblock = tk.BooleanVar(
+            value=self.cfg.get("minibar_locked", False))
+        m.add_checkbutton(label="Verrouiller la mini-barre",
+                          variable=self.var_mblock,
+                          command=self.on_toggle_mblock,
+                          selectcolor=C_ACCENT)
+        m.add_command(label="Réinitialiser la position de la mini-barre",
+                      command=self.reset_minibar_position)
+        self.var_mbdock = tk.BooleanVar(
+            value=self.cfg.get("minibar_dock", False))
+        m.add_checkbutton(label="Ancrer à la barre des tâches",
+                          variable=self.var_mbdock,
+                          command=self.on_toggle_mbdock,
+                          selectcolor=C_ACCENT)
         # sous-menu : modificateur d'accès direct aux persos
         self.var_direct = tk.StringVar(value=self.cfg.get("direct_mod", "Alt"))
         sm = tk.Menu(m, tearoff=0, bg=C_CARD, fg=C_TEXT,
@@ -1302,6 +1349,8 @@ class App:
                           selectcolor=C_ACCENT)
         m.add_command(label="Vérifier les mises à jour",
                       command=lambda: self.check_updates_async(manual=True))
+        m.add_separator()
+        m.add_command(label="Diagnostic", command=self.show_diag)
         m.add_separator()
         m.add_command(label="Ouvrir le dossier des mises à jour",
                       command=self.open_update_folder)
@@ -1329,6 +1378,17 @@ class App:
         elif self.minimized:
             self._mb_hide_ticks = 0
 
+    def on_toggle_mblock(self):
+        self.cfg["minibar_locked"] = self.var_mblock.get()
+        self.save_config()
+
+    def on_toggle_mbdock(self):
+        self.cfg["minibar_dock"] = self.var_mbdock.get()
+        # l'ancrage impose une position calculée : on oublie l'ancienne
+        self.cfg["minibar_pos"] = None
+        self.save_config()
+        self.reset_minibar_position()
+
     def on_toggle_autoupd(self):
         self.cfg["auto_update"] = self.var_autoupd.get()
         self.save_config()
@@ -1338,6 +1398,18 @@ class App:
             os.startfile(os.path.dirname(config_path()))
         except Exception:
             pass
+
+    def show_diag(self):
+        from tkinter import messagebox
+        messagebox.showinfo(
+            APP_TITLE,
+            f"Version : {APP_VERSION}\n"
+            f"Rendu images (Pillow) : "
+            f"{'actif' if PIL_OK else 'INDISPONIBLE'}\n\n"
+            + ("" if PIL_OK else
+               "Pillow n'est pas embarqué dans cet exe : les icônes de "
+               "classe ne peuvent pas s'afficher. Recompile avec le "
+               "COMPILER.bat à jour et réinstalle."))
 
     def notify_safe(self, title, message):
         """Notification qui respecte le mode 'icône exclusive' : si Kali
