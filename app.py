@@ -98,7 +98,7 @@ VK_CODES = {
 }
 
 APP_TITLE = "Kali"
-APP_VERSION = "3.1"
+APP_VERSION = "3.2"
 
 # Style par classe : (glyphe d'arme stylisé, couleur) — dessins génériques,
 # aucune ressource Ankama. Détecté depuis le titre "Nom - Classe - ...".
@@ -167,19 +167,20 @@ def get_window_hicon(hwnd):
     return get_cls(hwnd, -14) or get_cls(hwnd, -34)  # GCLP_HICON / HICONSM
 
 
-def window_icon_image(hwnd, size, bg="#16161e"):
-    """PhotoImage haute qualité de l'icône de la fenêtre, sur fond `bg`.
-    L'icône est rendue par Windows à sa taille native la plus proche puis
-    réduite proprement (supersampling), ce qui évite le flou d'agrandissement.
+def window_icon_image(hwnd, size, bg=None):
+    """PhotoImage haute qualité de l'icône de la fenêtre, DÉCOUPÉE EN ROND
+    (coins transparents). Si `bg` est fourni, les pixels transparents de
+    l'icône elle-même sont comblés par cette couleur ; sinon fond transparent.
+    L'icône est rendue par Windows à sa taille native puis réduite (supersampling).
     Retourne None si la fenêtre n'a pas d'icône exploitable."""
-    key = (hwnd, size)
+    key = (hwnd, size, bg)
     if key in _WICON_CACHE:
         return _WICON_CACHE[key]
     img = None
+    fill = bg if bg else "#16161e"
     try:
         hicon = get_window_hicon(hwnd)
         if hicon:
-            # rend à une résolution multiple >= 2x pour un beau downscale
             cap = size
             while cap < size * 2:
                 cap *= 2
@@ -188,47 +189,53 @@ def window_icon_image(hwnd, size, bg="#16161e"):
             mem = gdi32.CreateCompatibleDC(hdc)
             bmi = BITMAPINFOHEADER()
             bmi.biSize = ctypes.sizeof(BITMAPINFOHEADER)
-            bmi.biWidth, bmi.biHeight = cap, -cap  # top-down
+            bmi.biWidth, bmi.biHeight = cap, -cap
             bmi.biPlanes, bmi.biBitCount = 1, 32
             bits = ctypes.c_void_p()
             hbmp = gdi32.CreateDIBSection(mem, ctypes.byref(bmi), 0,
                                           ctypes.byref(bits), None, 0)
             oldobj = gdi32.SelectObject(mem, hbmp)
-            r, g, b = (int(bg[i:i + 2], 16) for i in (1, 3, 5))
+            r, g, b = (int(fill[i:i + 2], 16) for i in (1, 3, 5))
             brush = gdi32.CreateSolidBrush((b << 16) | (g << 8) | r)
             rect = (ctypes.c_long * 4)(0, 0, cap, cap)
             user32.FillRect(mem, ctypes.byref(rect), brush)
             gdi32.DeleteObject(brush)
             user32.DrawIconEx(mem, 0, 0, hicon, cap, cap, 0, None, 3)
-            raw = ctypes.string_at(bits.value, cap * cap * 4)  # BGRA
+            raw = ctypes.string_at(bits.value, cap * cap * 4)
             gdi32.SelectObject(mem, oldobj)
             gdi32.DeleteObject(hbmp)
             gdi32.DeleteDC(mem)
             user32.ReleaseDC(0, hdc)
-            # downscale moyenné cap -> size (moyenne de blocs, anti-crénelage)
+
+            img = tk.PhotoImage(width=size, height=size)
+            cxf = (size - 1) / 2.0
+            rad2 = (size / 2.0) ** 2
             step = cap / size
             rows = []
+            outside = []   # (x, y) hors du disque -> transparents
             for y in range(size):
-                y0 = int(y * step)
-                y1 = max(y0 + 1, int((y + 1) * step))
+                y0 = int(y * step); y1 = max(y0 + 1, int((y + 1) * step))
+                dy = y - cxf
                 row = []
                 for x in range(size):
-                    x0 = int(x * step)
-                    x1 = max(x0 + 1, int((x + 1) * step))
-                    sr = sg = sb = cnt = 0
-                    for yy in range(y0, y1):
-                        rb = yy * cap * 4
-                        for xx in range(x0, x1):
-                            o = rb + xx * 4
-                            sb += raw[o]; sg += raw[o + 1]; sr += raw[o + 2]
-                            cnt += 1
-                    if cnt:
-                        row.append(f"#{sr//cnt:02x}{sg//cnt:02x}{sb//cnt:02x}")
+                    if ((x - cxf) ** 2 + dy * dy) <= rad2:
+                        x0 = int(x * step); x1 = max(x0 + 1, int((x + 1) * step))
+                        sr = sg = sb = cnt = 0
+                        for yy in range(y0, y1):
+                            rb = yy * cap * 4
+                            for xx in range(x0, x1):
+                                o = rb + xx * 4
+                                sb += raw[o]; sg += raw[o+1]; sr += raw[o+2]
+                                cnt += 1
+                        row.append(f"#{sr//cnt:02x}{sg//cnt:02x}{sb//cnt:02x}"
+                                   if cnt else fill)
                     else:
-                        row.append(bg)
+                        row.append(fill)
+                        outside.append((x, y))
                 rows.append("{" + " ".join(row) + "}")
-            img = tk.PhotoImage(width=size, height=size)
             img.put(" ".join(rows))
+            for x, y in outside:
+                img.transparency_set(x, y, True)
     except Exception:
         img = None
     _WICON_CACHE[key] = img
@@ -664,9 +671,11 @@ class App:
             style = get_style(hwnd, GWL_EXSTYLE)
             style = (style | WS_EX_APPWINDOW) & ~WS_EX_TOOLWINDOW
             set_style(hwnd, GWL_EXSTYLE, style)
-            # le style ne prend effet qu'après un cycle masquer/afficher
-            self.root.withdraw()
-            self.root.after(10, self.root.deiconify)
+            # le style ne prend effet qu'après un cycle masquer/afficher,
+            # MAIS seulement si Kali est censé être visible (pas en mini-barre)
+            if not self.minimized:
+                self.root.withdraw()
+                self.root.after(10, self.root.deiconify)
         except Exception:
             pass
 
@@ -912,7 +921,7 @@ class App:
                           width=3 if active else 2, tags=tag)
 
             hwnd = self.windows.get(name)
-            icon = window_icon_image(hwnd, int(R * 1.7)) if hwnd else None
+            icon = window_icon_image(hwnd, int(R * 1.7), bg="#16161e") if hwnd else None
             drawn = False
             if icon is not None:
                 try:
