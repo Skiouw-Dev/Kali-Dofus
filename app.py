@@ -99,7 +99,7 @@ VK_CODES = {
 }
 
 APP_TITLE = "Kali"
-APP_VERSION = "3.4"
+APP_VERSION = "3.5"
 
 # Style par classe : (glyphe d'arme stylisé, couleur) — dessins génériques,
 # aucune ressource Ankama. Détecté depuis le titre "Nom - Classe - ...".
@@ -904,7 +904,9 @@ class App:
             return
         mb = tk.Toplevel(self.root)
         mb.overrideredirect(True)
-        mb.attributes("-topmost", True)
+        # PAS de 'topmost' : la mini-barre se comporte comme une fenêtre
+        # normale (recouvrable). watch_foreground la remonte au-dessus de
+        # Dofus quand le jeu est actif.
         self._mb_trans = "#010203"
         try:
             mb.attributes("-transparentcolor", self._mb_trans)
@@ -1655,32 +1657,27 @@ class App:
         self.root.after(3000, self.tick)
 
     def watch_foreground(self):
-        """Quand Kali est réduit : la mini-barre n'est visible que si Dofus
-        (ou la mini-barre elle-même) est au premier plan. Un délai de grâce
-        généreux évite les clignotements lors des transitions de focus."""
+        """Kali réduit : la mini-barre est TOUJOURS affichée mais se comporte
+        comme une fenêtre normale (pas 'topmost'). Quand une fenêtre Dofus
+        passe au premier plan, on replace la mini-barre juste au-dessus d'elle
+        pour qu'elle reste visible ; sinon une autre appli la recouvre."""
         try:
             if self.minimized and self.cfg.get("minibar", True):
+                self.show_minibar()          # garantit qu'elle existe/visible
                 fg = GetForegroundWindow()
                 on_dofus = fg in self.windows.values()
-                on_mb = False
-                if self.mb is not None:
+                # sur Dofus : placer la mini-barre juste AU-DESSUS de la
+                # fenêtre Dofus active (et non au-dessus de tout)
+                if on_dofus and self.mb is not None:
                     try:
                         mbid = int(self.mb.winfo_id())
-                        on_mb = (fg == mbid or GetAncestor(fg, 2) == mbid)
+                        SWP = 0x0010 | 0x0002 | 0x0001  # NOACTIVATE|NOMOVE|NOSIZE
+                        user32.SetWindowPos(mbid, fg, 0, 0, 0, 0, SWP)
                     except Exception:
-                        pass
-                # fenêtre transitoire (bureau, alt-tab) : on ne cache pas
-                transient = (fg == 0)
-                want = on_dofus or on_mb
-                if want or transient:
-                    self._mb_hide_ticks = 0
-                    if want:
-                        self.show_minibar()
-                else:
-                    # ~1 s de grâce (5 ticks) avant de masquer réellement
-                    self._mb_hide_ticks = getattr(self, "_mb_hide_ticks", 0) + 1
-                    if self._mb_hide_ticks >= 5:
-                        self.hide_minibar()
+                        try:
+                            self.mb.lift()
+                        except Exception:
+                            pass
         except Exception:
             pass
         self.root.after(200, self.watch_foreground)
