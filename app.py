@@ -98,7 +98,7 @@ VK_CODES = {
 }
 
 APP_TITLE = "Kali"
-APP_VERSION = "3.0"
+APP_VERSION = "3.1"
 
 # Style par classe : (glyphe d'arme stylisé, couleur) — dessins génériques,
 # aucune ressource Ankama. Détecté depuis le titre "Nom - Classe - ...".
@@ -158,7 +158,8 @@ class BITMAPINFOHEADER(ctypes.Structure):
 def get_window_hicon(hwnd):
     """Récupère le handle de l'icône de la fenêtre (sans bloquer)."""
     res = wt.DWORD()
-    for wparam in (2, 1, 0):  # ICON_SMALL2, ICON_BIG, ICON_SMALL
+    # priorité aux GRANDES icônes pour la qualité : ICON_BIG puis fallbacks
+    for wparam in (1, 2, 0):  # ICON_BIG, ICON_SMALL2, ICON_SMALL
         if user32.SendMessageTimeoutW(hwnd, 0x7F, wparam, 0,
                                       0x2, 200, ctypes.byref(res)) and res.value:
             return res.value
@@ -167,7 +168,9 @@ def get_window_hicon(hwnd):
 
 
 def window_icon_image(hwnd, size, bg="#16161e"):
-    """PhotoImage de l'icône de la fenêtre, dessinée sur fond `bg`.
+    """PhotoImage haute qualité de l'icône de la fenêtre, sur fond `bg`.
+    L'icône est rendue par Windows à sa taille native la plus proche puis
+    réduite proprement (supersampling), ce qui évite le flou d'agrandissement.
     Retourne None si la fenêtre n'a pas d'icône exploitable."""
     key = (hwnd, size)
     if key in _WICON_CACHE:
@@ -176,37 +179,53 @@ def window_icon_image(hwnd, size, bg="#16161e"):
     try:
         hicon = get_window_hicon(hwnd)
         if hicon:
+            # rend à une résolution multiple >= 2x pour un beau downscale
+            cap = size
+            while cap < size * 2:
+                cap *= 2
+            cap = min(cap, 128)
             hdc = user32.GetDC(0)
             mem = gdi32.CreateCompatibleDC(hdc)
             bmi = BITMAPINFOHEADER()
             bmi.biSize = ctypes.sizeof(BITMAPINFOHEADER)
-            bmi.biWidth, bmi.biHeight = size, -size  # top-down
+            bmi.biWidth, bmi.biHeight = cap, -cap  # top-down
             bmi.biPlanes, bmi.biBitCount = 1, 32
             bits = ctypes.c_void_p()
             hbmp = gdi32.CreateDIBSection(mem, ctypes.byref(bmi), 0,
                                           ctypes.byref(bits), None, 0)
-            old = gdi32.SelectObject(mem, hbmp)
-            # pré-remplit avec la couleur du jeton (gère la transparence)
+            oldobj = gdi32.SelectObject(mem, hbmp)
             r, g, b = (int(bg[i:i + 2], 16) for i in (1, 3, 5))
             brush = gdi32.CreateSolidBrush((b << 16) | (g << 8) | r)
-            rect = (ctypes.c_long * 4)(0, 0, size, size)
+            rect = (ctypes.c_long * 4)(0, 0, cap, cap)
             user32.FillRect(mem, ctypes.byref(rect), brush)
             gdi32.DeleteObject(brush)
-            # dessine l'icône par-dessus (mise à l'échelle par Windows)
-            user32.DrawIconEx(mem, 0, 0, hicon, size, size, 0, None, 3)
-            raw = ctypes.string_at(bits.value, size * size * 4)  # BGRA
-            gdi32.SelectObject(mem, old)
+            user32.DrawIconEx(mem, 0, 0, hicon, cap, cap, 0, None, 3)
+            raw = ctypes.string_at(bits.value, cap * cap * 4)  # BGRA
+            gdi32.SelectObject(mem, oldobj)
             gdi32.DeleteObject(hbmp)
             gdi32.DeleteDC(mem)
             user32.ReleaseDC(0, hdc)
-            # construit l'image tkinter ligne par ligne
+            # downscale moyenné cap -> size (moyenne de blocs, anti-crénelage)
+            step = cap / size
             rows = []
             for y in range(size):
+                y0 = int(y * step)
+                y1 = max(y0 + 1, int((y + 1) * step))
                 row = []
-                base = y * size * 4
                 for x in range(size):
-                    o = base + x * 4
-                    row.append(f"#{raw[o+2]:02x}{raw[o+1]:02x}{raw[o]:02x}")
+                    x0 = int(x * step)
+                    x1 = max(x0 + 1, int((x + 1) * step))
+                    sr = sg = sb = cnt = 0
+                    for yy in range(y0, y1):
+                        rb = yy * cap * 4
+                        for xx in range(x0, x1):
+                            o = rb + xx * 4
+                            sb += raw[o]; sg += raw[o + 1]; sr += raw[o + 2]
+                            cnt += 1
+                    if cnt:
+                        row.append(f"#{sr//cnt:02x}{sg//cnt:02x}{sb//cnt:02x}")
+                    else:
+                        row.append(bg)
                 rows.append("{" + " ".join(row) + "}")
             img = tk.PhotoImage(width=size, height=size)
             img.put(" ".join(rows))
@@ -1132,11 +1151,13 @@ class App:
                 if k.startswith("_PYI") or k == "_MEIPASS2":
                     env.pop(k, None)
             CREATE_NO_WINDOW = 0x08000000
+            # /d évite le souci de titre "" interprété comme chemin réseau ;
+            # timeout laisse l'ancienne instance nettoyer son dossier _MEI
             subprocess.Popen(
-                ["cmd", "/c",
-                 f'ping -n 2 127.0.0.1 >nul & start "" "{sys.executable}"'],
-                env=env, cwd=os.path.expanduser("~"),
-                creationflags=CREATE_NO_WINDOW)
+                f'cmd /c timeout /t 1 /nobreak >nul & '
+                f'start "Kali" /d "{os.path.dirname(sys.executable)}" '
+                f'"{sys.executable}"',
+                env=env, creationflags=CREATE_NO_WINDOW, shell=True)
         else:
             subprocess.Popen([sys.executable, sys.argv[0]])
         os._exit(0)
@@ -1286,15 +1307,20 @@ class App:
                            font=self.f_body, anchor="w", cursor="hand2")
             lbl.pack(side="left", fill="x", expand=True)
 
+            # indicateur "fenêtre active" (visible seulement sur le perso courant)
+            dot = tk.Label(card, text="", bg=C_CARD, fg=C_ACCENT,
+                           font=self.f_small)
+            dot.pack(side="right", padx=(0, 10))
+
             item = self.canvas.create_window(
                 0, self.slot_y(i), window=card, anchor="nw",
                 height=self.CARD_H, width=self.canvas.winfo_width() or 360)
 
             self.cards.append({"frame": card, "grip": grip, "num": num,
-                               "lbl": lbl, "item": item,
+                               "lbl": lbl, "dot": dot, "item": item,
                                "y": float(self.slot_y(i))})
 
-            for w in (card, grip, num, lbl):
+            for w in (card, grip, num, lbl, dot):
                 w.bind("<ButtonPress-1>",   lambda e, c=card: self.drag_start(e, c))
                 w.bind("<B1-Motion>",       self.drag_motion)
                 w.bind("<ButtonRelease-1>", self.drag_end)
@@ -1327,6 +1353,8 @@ class App:
         c["num"].configure(bg=bg, text=str(i + 1),
                            fg=C_ACCENT if active else C_TEXT_2)
         c["lbl"].configure(bg=bg)
+        c["dot"].configure(bg=bg,
+                           text="\u25cf en jeu" if active else "")
 
     def update_all_cards(self):
         for i in range(len(self.cards)):
@@ -1340,7 +1368,7 @@ class App:
             return
         c = self.cards[i]
         bg = C_CARD_HOV if on else C_CARD
-        for k in ("frame", "grip", "num", "lbl"):
+        for k in ("frame", "grip", "num", "lbl", "dot"):
             c[k].configure(bg=bg)
 
     # --- animation : les cartes glissent vers leur emplacement ---
