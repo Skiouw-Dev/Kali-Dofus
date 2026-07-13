@@ -99,7 +99,7 @@ VK_CODES = {
 }
 
 APP_TITLE = "Kali"
-APP_VERSION = "3.3"
+APP_VERSION = "3.4"
 
 # Style par classe : (glyphe d'arme stylisé, couleur) — dessins génériques,
 # aucune ressource Ankama. Détecté depuis le titre "Nom - Classe - ...".
@@ -226,12 +226,20 @@ def window_icon_pil(hwnd, size):
     return img
 
 
+_TOKEN_CACHE = {}
+
+
 def make_token_pil(hwnd, R, ring_hex, active, accent_hex="#4cc2ff",
                    bg_hex="#16161e"):
     """Jeton complet Pillow (halo + anneau de classe + icône), tout
-    anti-aliasé. Retourne un ImageTk.PhotoImage prêt à afficher, ou None."""
+    anti-aliasé. Retourne un ImageTk.PhotoImage prêt à afficher, ou None.
+    Mis en cache par (hwnd, R, classe, actif) : recalcul uniquement si l'un
+    de ces paramètres change -> changement de perso actif quasi instantané."""
     if not PIL_OK:
         return None
+    key = (hwnd, R, ring_hex, active)
+    if key in _TOKEN_CACHE:
+        return _TOKEN_CACHE[key]
     halo = 9
     S = 2 * (R + halo) + 2
     SS = 4
@@ -265,7 +273,9 @@ def make_token_pil(hwnd, R, ring_hex, active, accent_hex="#4cc2ff",
                                  int(c - ico.height / 2)))
 
     im = im.resize((S, S), Image.LANCZOS)
-    return ImageTk.PhotoImage(im)
+    tkimg = ImageTk.PhotoImage(im)
+    _TOKEN_CACHE[key] = tkimg
+    return tkimg
 
 
 def normalize_class(txt):
@@ -646,6 +656,8 @@ class App:
         self.session_start = None  # début de la session Dofus en cours
         self.minimized = False
         self.mb = None             # mini-barre flottante (mode réduit)
+        self.mb_visible = False
+        self._mb_hide_ticks = 0
         self.break_notified = 0    # heures de jeu déjà notifiées
         self.cfg = self.load_config()
 
@@ -884,12 +896,12 @@ class App:
     # classe, double anneau lumineux sur le perso actif.
     MB_R = 21        # rayon des jetons
     MB_GAP = 14      # espace entre jetons
-    MB_H = 62        # hauteur du canevas
+    MB_H = 66        # hauteur du canevas (marge pour le halo)
 
-    def show_minibar(self):
-        if not self.cfg.get("minibar", True):
+    def _ensure_minibar(self):
+        """Crée la fenêtre mini-barre une seule fois (réutilisée ensuite)."""
+        if self.mb is not None:
             return
-        self.hide_minibar()
         mb = tk.Toplevel(self.root)
         mb.overrideredirect(True)
         mb.attributes("-topmost", True)
@@ -902,24 +914,54 @@ class App:
                                    highlightthickness=0, height=self.MB_H)
         self.mb_canvas.pack()
         self.mb = mb
+        self.mb_visible = False
+        mb.withdraw()
         self.fill_minibar()
-        pos = self.cfg.get("minibar_pos")
-        mb.update_idletasks()
+        self._place_minibar()
+
+    def _place_minibar(self):
+        if self.mb is None:
+            return
+        self.mb.update_idletasks()
         w = self.mb_canvas.winfo_reqwidth()
-        sw, sh = mb.winfo_screenwidth(), mb.winfo_screenheight()
+        sw, sh = self.mb.winfo_screenwidth(), self.mb.winfo_screenheight()
+        pos = self.cfg.get("minibar_pos")
         if pos and 0 <= pos[0] <= sw - 40 and 0 <= pos[1] <= sh - 40:
             x, y = pos
         else:
             x, y = sw - w - 16, sh - self.MB_H - 64
-        mb.geometry(f"+{x}+{y}")
+        self.mb.geometry(f"+{x}+{y}")
+
+    def show_minibar(self):
+        """Affiche la mini-barre (création à la volée si besoin). Instantané.
+        Ne fait rien si elle est déjà visible (évite tout clignotement)."""
+        if not self.cfg.get("minibar", True):
+            return
+        if getattr(self, "mb_visible", False) and self.mb is not None:
+            return
+        self._ensure_minibar()
+        self.mb.deiconify()
+        self.mb.lift()
+        self.mb_visible = True
 
     def hide_minibar(self):
+        """Masque la mini-barre sans la détruire (réaffichage instantané)."""
+        if self.mb is not None and getattr(self, "mb_visible", False):
+            try:
+                self.mb.withdraw()
+            except Exception:
+                pass
+            self.mb_visible = False
+
+    def destroy_minibar(self):
+        """Détruit réellement la mini-barre (à la restauration de Kali)."""
         if self.mb is not None:
             try:
                 self.mb.destroy()
             except Exception:
                 pass
             self.mb = None
+            self.mb_visible = False
 
     def fill_minibar(self):
         if self.mb is None:
@@ -929,14 +971,15 @@ class App:
         self._mb_imgs = []   # libère les images du rendu précédent
         n = len(self.order)
         R, GAP = self.MB_R, self.MB_GAP
+        HALO = 10            # marge pour que le halo ne soit jamais coupé
         cell = 2 * R + GAP
-        w = max(1, n) * cell - GAP + 34   # +34 : bouton restaurer
+        w = HALO + max(1, n) * cell - GAP + HALO + 30  # +30 : bouton restaurer
         h = self.MB_H
         c.configure(width=w)
         cy = h // 2
 
         for i, name in enumerate(self.order):
-            cx = R + i * cell
+            cx = HALO + R + i * cell
             cls = self.klass.get(name, "")
             glyph, color = CLASS_STYLE.get(cls, CLASS_DEFAULT)
             active = (i == self.current_index)
@@ -984,7 +1027,7 @@ class App:
             c.tag_bind(tag, "<Leave>", lambda e: c.configure(cursor=""))
 
         # bouton restaurer : petit jeton discret en bout de ligne
-        bx = w - 12
+        bx = w - 16
         c.create_oval(bx - 10, cy - 10, bx + 10, cy + 10, fill="#16161e",
                       outline=C_STROKE, tags="mbrestore")
         c.create_text(bx, cy, text="\u25a3", fill=C_TEXT_2,
@@ -1062,6 +1105,7 @@ class App:
     # ---------------- liste des persos ----------------
     def refresh_windows(self):
         wins = enum_dofus_windows()
+        _TOKEN_CACHE.clear()   # icônes/jetons potentiellement obsolètes
         # noms uniques : si deux fenêtres ont le même titre (ex: deux "Dofus"
         # pas encore connectés), on suffixe (2), (3)...
         self.windows = {}
@@ -1278,8 +1322,10 @@ class App:
     def on_toggle_minibar(self):
         self.cfg["minibar"] = self.var_minibar.get()
         self.save_config()
-        if self.minimized:
-            self.show_minibar() if self.cfg["minibar"] else self.hide_minibar()
+        if not self.cfg["minibar"]:
+            self.destroy_minibar()
+        elif self.minimized:
+            self._mb_hide_ticks = 0
 
     def on_toggle_autoupd(self):
         self.cfg["auto_update"] = self.var_autoupd.get()
@@ -1328,7 +1374,7 @@ class App:
 
         n = len(self.order)
         self.lbl_count.config(text=f"{n} fenêtre{'s' if n > 1 else ''} Dofus")
-        if self.mb is not None:
+        if self.mb is not None and getattr(self, "mb_visible", False):
             self.fill_minibar()
 
         if not self.order:
@@ -1412,7 +1458,7 @@ class App:
         for i in range(len(self.cards)):
             self.update_card(i)
         # garde la mini-barre synchronisée (anneau bleu sur le bon perso)
-        if self.mb is not None:
+        if self.mb is not None and getattr(self, "mb_visible", False):
             self.fill_minibar()
 
     def set_hover(self, frame, on):
@@ -1587,8 +1633,9 @@ class App:
     # ---------------- zone de notification (systray) ----------------
     def restore_from_tray(self):
         self.minimized = False
+        self._mb_hide_ticks = 0
         self.tray.hide()          # retour barre des tâches : icône retirée
-        self.hide_minibar()
+        self.destroy_minibar()
         self.root.deiconify()
         self.root.lift()
         # impulsion "premier plan" pour passer devant, puis relâche
@@ -1609,28 +1656,34 @@ class App:
 
     def watch_foreground(self):
         """Quand Kali est réduit : la mini-barre n'est visible que si Dofus
-        (ou la mini-barre elle-même) est au premier plan."""
+        (ou la mini-barre elle-même) est au premier plan. Un délai de grâce
+        généreux évite les clignotements lors des transitions de focus."""
         try:
             if self.minimized and self.cfg.get("minibar", True):
                 fg = GetForegroundWindow()
                 on_dofus = fg in self.windows.values()
-                on_mb = (self.mb is not None
-                         and fg == int(self.mb.winfo_id()))
-                # certaines fenêtres enfant de la mini-barre : tolérance
-                if self.mb is not None and not on_mb:
+                on_mb = False
+                if self.mb is not None:
                     try:
-                        on_mb = (self.mb.winfo_id()
-                                 == GetAncestor(fg, 2))  # GA_ROOT
+                        mbid = int(self.mb.winfo_id())
+                        on_mb = (fg == mbid or GetAncestor(fg, 2) == mbid)
                     except Exception:
                         pass
+                # fenêtre transitoire (bureau, alt-tab) : on ne cache pas
+                transient = (fg == 0)
                 want = on_dofus or on_mb
-                if want and self.mb is None:
-                    self.show_minibar()
-                elif not want and self.mb is not None:
-                    self.hide_minibar()
+                if want or transient:
+                    self._mb_hide_ticks = 0
+                    if want:
+                        self.show_minibar()
+                else:
+                    # ~1 s de grâce (5 ticks) avant de masquer réellement
+                    self._mb_hide_ticks = getattr(self, "_mb_hide_ticks", 0) + 1
+                    if self._mb_hide_ticks >= 5:
+                        self.hide_minibar()
         except Exception:
             pass
-        self.root.after(350, self.watch_foreground)
+        self.root.after(200, self.watch_foreground)
 
     def on_close(self):
         try:
