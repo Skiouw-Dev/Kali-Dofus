@@ -99,7 +99,7 @@ VK_CODES = {
 }
 
 APP_TITLE = "Kali"
-APP_VERSION = "3.9"
+APP_VERSION = "4.0"
 
 # Style par classe : (glyphe d'arme stylisé, couleur) — dessins génériques,
 # aucune ressource Ankama. Détecté depuis le titre "Nom - Classe - ...".
@@ -661,7 +661,6 @@ class App:
         self.minimized = False
         self.mb = None             # mini-barre flottante (mode réduit)
         self.mb_visible = False
-        self._mb_hide_ticks = 0
         self.break_notified = 0    # heures de jeu déjà notifiées
         self.cfg = self.load_config()
 
@@ -687,6 +686,7 @@ class App:
         self.refresh_windows()
         self.tick()
         self.watch_foreground()
+        self.sync_active_window()
 
         # vérification des mises à jour GitHub (2 s après le démarrage,
         # en arrière-plan, silencieuse si pas d'internet)
@@ -1002,7 +1002,7 @@ class App:
         R, GAP = self.MB_R, self.MB_GAP
         HALO = 10            # marge pour que le halo ne soit jamais coupé
         cell = 2 * R + GAP
-        w = HALO + max(1, n) * cell - GAP + HALO + 30  # +30 : bouton restaurer
+        w = HALO + max(1, n) * cell - GAP + HALO + 54  # +54 : cadenas + restaurer
         h = self.MB_H
         c.configure(width=w)
         cy = h // 2
@@ -1055,6 +1055,22 @@ class App:
             c.tag_bind(tag, "<Enter>", lambda e: c.configure(cursor="hand2"))
             c.tag_bind(tag, "<Leave>", lambda e: c.configure(cursor=""))
 
+        # bouton cadenas : verrouille/déverrouille le déplacement
+        locked = self.cfg.get("minibar_locked", False)
+        lx = w - 40
+        c.create_oval(lx - 10, cy - 10, lx + 10, cy + 10,
+                      fill=C_CARD_ACT if locked else "#16161e",
+                      outline=C_ACCENT if locked else C_STROKE,
+                      tags="mblock")
+        c.create_text(lx, cy, text="\U0001f512" if locked else "\U0001f513",
+                      fill=C_ACCENT if locked else C_TEXT_2,
+                      font=("Segoe UI", 8), tags="mblock")
+        c.tag_bind("mblock", "<ButtonPress-1>", self._mb_toggle_lock)
+        c.tag_bind("mblock", "<Enter>",
+                   lambda e: c.configure(cursor="hand2"))
+        c.tag_bind("mblock", "<Leave>",
+                   lambda e: c.configure(cursor=""))
+
         # bouton restaurer : petit jeton discret en bout de ligne
         bx = w - 16
         c.create_oval(bx - 10, cy - 10, bx + 10, cy + 10, fill="#16161e",
@@ -1071,14 +1087,12 @@ class App:
         c.bind("<B1-Motion>", self.mb_drag)
         c.bind("<ButtonRelease-1>", self.mb_release)
 
-    @staticmethod
-    def _soft(hex_color):
-        """Version atténuée d'une couleur (pour adoucir le bord de l'anneau)."""
-        r = int(hex_color[1:3], 16)
-        g = int(hex_color[3:5], 16)
-        b = int(hex_color[5:7], 16)
-        f = 0.55
-        return f"#{int(r*f):02x}{int(g*f):02x}{int(b*f):02x}"
+    def _mb_toggle_lock(self, event=None):
+        self.cfg["minibar_locked"] = not self.cfg.get("minibar_locked", False)
+        self.save_config()
+        if hasattr(self, "var_mblock"):
+            self.var_mblock.set(self.cfg["minibar_locked"])
+        self.fill_minibar()   # redessine le cadenas dans son nouvel état
 
     def mb_press(self, event, index):
         self._mb_drag = {
@@ -1312,12 +1326,6 @@ class App:
                           variable=self.var_minibar,
                           command=self.on_toggle_minibar,
                           selectcolor=C_ACCENT)
-        self.var_mblock = tk.BooleanVar(
-            value=self.cfg.get("minibar_locked", False))
-        m.add_checkbutton(label="Verrouiller la mini-barre",
-                          variable=self.var_mblock,
-                          command=self.on_toggle_mblock,
-                          selectcolor=C_ACCENT)
         m.add_command(label="Réinitialiser la position de la mini-barre",
                       command=self.reset_minibar_position)
         # sous-menu : modificateur d'accès direct aux persos
@@ -1366,11 +1374,7 @@ class App:
         if not self.cfg["minibar"]:
             self.destroy_minibar()
         elif self.minimized:
-            self._mb_hide_ticks = 0
-
-    def on_toggle_mblock(self):
-        self.cfg["minibar_locked"] = self.var_mblock.get()
-        self.save_config()
+            self.show_minibar()
 
     def on_toggle_autoupd(self):
         self.cfg["auto_update"] = self.var_autoupd.get()
@@ -1690,7 +1694,6 @@ class App:
     # ---------------- zone de notification (systray) ----------------
     def restore_from_tray(self):
         self.minimized = False
-        self._mb_hide_ticks = 0
         self.tray.hide()          # retour barre des tâches : icône retirée
         self.destroy_minibar()
         self.root.deiconify()
@@ -1727,6 +1730,21 @@ class App:
         except Exception:
             pass
         self.root.after(500, self.watch_foreground)
+
+    def sync_active_window(self):
+        """Suit la fenêtre Dofus RÉELLEMENT au premier plan (Alt-Tab, clic
+        barre des tâches, raccourcis internes de Dofus...) et déplace
+        l'anneau bleu en conséquence. Rapide (120 ms) pour un suivi fluide."""
+        try:
+            fg = GetForegroundWindow()
+            for i, name in enumerate(self.order):
+                if self.windows.get(name) == fg and i != self.current_index:
+                    self.current_index = i
+                    self.update_all_cards()
+                    break
+        except Exception:
+            pass
+        self.root.after(120, self.sync_active_window)
 
     def on_close(self):
         try:
