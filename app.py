@@ -107,7 +107,7 @@ VK_CODES = {
 }
 
 APP_TITLE = "Kali"
-APP_VERSION = "4.6"
+APP_VERSION = "4.7"
 
 # Style par classe : (glyphe d'arme stylisé, couleur) — dessins génériques,
 # aucune ressource Ankama. Détecté depuis le titre "Nom - Classe - ...".
@@ -371,6 +371,7 @@ WHEEL_R_IN = 72            # zone centrale : pseudo + annuler
 WHEEL_MARGIN = 8
 WHEEL_SIZE = 2 * (WHEEL_R_OUT + WHEEL_MARGIN)
 WHEEL_KEY = "#010203"      # couleur que Windows rend transparente
+WHEEL_KEY_RGB = (1, 2, 3)
 WHEEL_ACCENT = (76, 194, 255, 255)
 
 # touches inutilisables comme touche de roue : modificateurs, Échap,
@@ -549,12 +550,22 @@ def build_wheel_overlay(n, i):
 
 
 def compose_wheel_frame(base, overlay):
-    """Image finale : fond + (surbrillance) + jetons."""
+    """Image finale : fond + (surbrillance) + jetons, prête pour Windows.
+
+    Windows ne sait rendre transparente QUE la couleur clé exacte : un pixel
+    de bord à moitié transparent se mélangerait à cette couleur sans jamais
+    la retrouver et resterait visible (petits points sombres autour de la
+    roue). On tranche donc chaque pixel : opaque (couleur pure de la roue)
+    ou couleur clé exacte (transparent). Plus aucun pixel parasite."""
     im = base["bg"].copy()
     if overlay is not None:
         im.alpha_composite(overlay)
     im.alpha_composite(base["tokens"])
-    return im
+    r, g, b, a = im.split()
+    mask = a.point(lambda v: 255 if v >= 128 else 0)
+    out = Image.new("RGB", im.size, WHEEL_KEY_RGB)
+    out.paste(Image.merge("RGB", (r, g, b)), mask=mask)
+    return out
 # ==== ROUE DES PERSONNAGES : FIN ====
 
 
