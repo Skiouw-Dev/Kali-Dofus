@@ -17,6 +17,7 @@ Fonctionnalités :
 import ctypes
 import ctypes.wintypes as wt
 import json
+import math
 import os
 import re
 import subprocess
@@ -66,6 +67,12 @@ ShowWindow = user32.ShowWindow
 SetForegroundWindow = user32.SetForegroundWindow
 GetForegroundWindow = user32.GetForegroundWindow
 GetAncestor = user32.GetAncestor
+GetAsyncKeyState = user32.GetAsyncKeyState
+# SetWindowPos « privé » (arguments typés : HWND_TOPMOST = -1 passe bien en 64 bits)
+_SetWindowPos = ctypes.WinDLL("user32").SetWindowPos
+_SetWindowPos.argtypes = [wt.HWND, wt.HWND, ctypes.c_int, ctypes.c_int,
+                          ctypes.c_int, ctypes.c_int, wt.UINT]
+_SetWindowPos.restype = wt.BOOL
 GetWindowThreadProcessId = user32.GetWindowThreadProcessId
 AttachThreadInput = user32.AttachThreadInput
 BringWindowToTop = user32.BringWindowToTop
@@ -100,7 +107,7 @@ VK_CODES = {
 }
 
 APP_TITLE = "Kali"
-APP_VERSION = "4.4"
+APP_VERSION = "4.6"
 
 # Style par classe : (glyphe d'arme stylisé, couleur) — dessins génériques,
 # aucune ressource Ankama. Détecté depuis le titre "Nom - Classe - ...".
@@ -348,6 +355,207 @@ def make_token_pil(hwnd, R, ring_hex, active, accent_hex="#4cc2ff",
     if ico is not None:
         _TOKEN_CACHE[key] = tkimg
     return tkimg
+
+
+# ==== ROUE DES PERSONNAGES : DEBUT (rendu Pillow + utilitaires) ====
+# ---------------------------------------------------------------------------
+# Roue des personnages : menu radial qu'on ouvre en MAINTENANT une touche
+# (ou un bouton de souris), qu'on vise avec la souris, puis qu'on relâche
+# pour passer sur le perso visé. Pure gestion de fenêtres : aucune action
+# n'est envoyée au jeu.
+# Rendu : 3 calques Pillow pré-calculés (fond, jetons, surbrillance du
+# secteur) -> survoler un secteur = simple échange d'image (fluide).
+# ---------------------------------------------------------------------------
+WHEEL_R_OUT = 176          # rayon extérieur de la roue
+WHEEL_R_IN = 72            # zone centrale : pseudo + annuler
+WHEEL_MARGIN = 8
+WHEEL_SIZE = 2 * (WHEEL_R_OUT + WHEEL_MARGIN)
+WHEEL_KEY = "#010203"      # couleur que Windows rend transparente
+WHEEL_ACCENT = (76, 194, 255, 255)
+
+# touches inutilisables comme touche de roue : modificateurs, Échap,
+# Windows, clics gauche/droit (nécessaires pour utiliser la fenêtre)
+WHEEL_EXCLUDED_KEYS = frozenset([0x01, 0x02, 0x03, 0x10, 0x11, 0x12, 0x1B,
+                                 0x5B, 0x5C, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4,
+                                 0xA5])
+
+WHEEL_CLASS_LABEL = {
+    "feca": "Féca", "osamodas": "Osamodas", "enutrof": "Enutrof",
+    "sram": "Sram", "xelor": "Xélor", "ecaflip": "Ecaflip",
+    "eniripsa": "Eniripsa", "iop": "Iop", "cra": "Crâ", "sadida": "Sadida",
+    "sacrieur": "Sacrieur", "pandawa": "Pandawa", "roublard": "Roublard",
+    "zobal": "Zobal", "steamer": "Steamer", "eliotrope": "Éliotrope",
+    "huppermage": "Huppermage", "ouginak": "Ouginak",
+    "forgelance": "Forgelance",
+}
+
+_VK_LABELS = {
+    0x04: "Souris : clic molette",
+    0x05: "Souris : bouton latéral arrière",
+    0x06: "Souris : bouton latéral avant",
+    0x08: "Retour arrière", 0x09: "Tab", 0x0D: "Entrée", 0x13: "Pause",
+    0x14: "Verr. Maj", 0x20: "Espace", 0x21: "Page haut", 0x22: "Page bas",
+    0x23: "Fin", 0x24: "Début", 0x25: "Flèche gauche", 0x26: "Flèche haut",
+    0x27: "Flèche droite", 0x28: "Flèche bas", 0x2C: "Impr. écran",
+    0x2D: "Inser", 0x2E: "Suppr", 0x6A: "Pavé *", 0x6B: "Pavé +",
+    0x6D: "Pavé -", 0x6E: "Pavé .", 0x6F: "Pavé /", 0x90: "Verr. Num",
+    0x91: "Arrêt défil.", 0xDE: "²",
+}
+
+
+def vk_name(vk):
+    """Nom lisible d'un code de touche / bouton de souris."""
+    if vk in _VK_LABELS:
+        return _VK_LABELS[vk]
+    if 0x30 <= vk <= 0x39 or 0x41 <= vk <= 0x5A:
+        return chr(vk)
+    if 0x60 <= vk <= 0x69:
+        return f"Pavé {vk - 0x60}"
+    if 0x70 <= vk <= 0x87:
+        return f"F{vk - 0x6F}"
+    return f"Touche (code {vk})"
+
+
+def vk_is_risky(vk):
+    """Touches très utilisées en jeu (chat, déplacements) : on prévient."""
+    return (0x30 <= vk <= 0x39 or 0x41 <= vk <= 0x5A
+            or vk in (0x08, 0x09, 0x0D, 0x20, 0x25, 0x26, 0x27, 0x28))
+
+
+def wheel_layout(n):
+    """(rayon médian des jetons, rayon d'un jeton) pour n personnages."""
+    n = max(1, n)
+    r_mid = (WHEEL_R_OUT + WHEEL_R_IN) / 2.0 + 2
+    tok = int(max(15, min(32, r_mid * math.sin(math.pi / max(n, 3)) * 0.78)))
+    return r_mid, tok
+
+
+def wheel_sector_at(dx, dy, n):
+    """Secteur visé par le curseur (dx, dy = écart au centre de la roue).
+    Retourne -1 dans la zone centrale (= annuler). Le perso n°1 est en
+    haut, les suivants dans le sens des aiguilles d'une montre."""
+    if n <= 0 or dx * dx + dy * dy < (WHEEL_R_IN * 0.9) ** 2:
+        return -1
+    step = 360.0 / n
+    ang = math.degrees(math.atan2(dy, dx))
+    return int(((ang + 90.0 + step / 2.0) % 360.0) // step) % n
+
+
+def _wheel_rgb(h):
+    return tuple(int(h[i:i + 2], 16) for i in (1, 3, 5)) + (255,)
+
+
+def _wheel_token(hwnd, ring_hex, r):
+    """Jeton rond : icône de la fenêtre + anneau couleur de classe.
+    Retourne (image RGBA, icône_trouvée)."""
+    SS = 3
+    S = 2 * r + 2
+    ring = _wheel_rgb(ring_hex)
+    ico = window_icon_pil(hwnd, 2 * (r - 3)) if hwnd else None
+    im = Image.new("RGBA", (S * SS, S * SS), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    c = S * SS / 2.0
+    R = r * SS
+    d.ellipse((c - R, c - R, c + R, c + R), fill=(22, 22, 30, 255),
+              outline=ring, width=3 * SS)
+    if ico is None:   # repli : disque teinté de la couleur de classe
+        k = (r - 3) * SS
+        tint = tuple(int(v * 0.45) for v in ring[:3]) + (255,)
+        d.ellipse((c - k, c - k, c + k, c + k), fill=tint)
+    im = im.resize((S, S), Image.LANCZOS)
+    if ico is not None:
+        im.alpha_composite(ico, ((S - ico.width) // 2,
+                                 (S - ico.height) // 2))
+    return im, ico is not None
+
+
+def build_wheel_base(entries):
+    """Calques fixes de la roue. entries = [(hwnd, couleur_anneau_hex)].
+    Retourne {'bg', 'tokens', 'complete'} (complete = toutes icônes lues)."""
+    n = len(entries)
+    size = WHEEL_SIZE
+    SS = 3
+    N = size * SS
+    c = N / 2.0
+    r_mid, tok = wheel_layout(n)
+    step = 360.0 / max(n, 1)
+    ro, ri = WHEEL_R_OUT * SS, WHEEL_R_IN * SS
+
+    bg = Image.new("RGBA", (N, N), (0, 0, 0, 0))
+    d = ImageDraw.Draw(bg)
+    d.ellipse((c - ro - 3 * SS, c - ro - 3 * SS, c + ro + 3 * SS,
+               c + ro + 3 * SS), fill=(70, 76, 96, 255))        # liseré
+    d.ellipse((c - ro, c - ro, c + ro, c + ro), fill=(26, 26, 34, 255))
+    if n > 1:
+        for i in range(n):                                      # séparateurs
+            a = math.radians(-90 + (i + 0.5) * step)
+            d.line((c + ri * math.cos(a), c + ri * math.sin(a),
+                    c + ro * math.cos(a), c + ro * math.sin(a)),
+                   fill=(52, 56, 72, 255), width=2 * SS)
+    d.ellipse((c - ri, c - ri, c + ri, c + ri), fill=(17, 17, 23, 255),
+              outline=(70, 76, 96, 255), width=2 * SS)
+    bg = bg.resize((size, size), Image.LANCZOS)
+
+    tokens = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    complete = True
+    for i, (hwnd, ring_hex) in enumerate(entries):
+        a = math.radians(-90 + i * step)
+        x = size / 2.0 + r_mid * math.cos(a)
+        y = size / 2.0 + r_mid * math.sin(a)
+        tk_im, ok = _wheel_token(hwnd, ring_hex, tok)
+        complete = complete and ok
+        S = tk_im.width
+        tokens.alpha_composite(tk_im, (int(round(x - S / 2.0)),
+                                       int(round(y - S / 2.0))))
+    return {"bg": bg, "tokens": tokens, "complete": complete}
+
+
+def build_wheel_overlay(n, i):
+    """Calque de surbrillance du secteur i (rempli + arc + anneau autour
+    du jeton). Les jetons restent intacts : leur zone est évidée."""
+    size = WHEEL_SIZE
+    SS = 3
+    N = size * SS
+    c = N / 2.0
+    n = max(1, n)
+    r_mid, tok = wheel_layout(n)
+    step = 360.0 / n
+    ro, ri = WHEEL_R_OUT * SS, WHEEL_R_IN * SS
+    a0 = -90 + i * step - step / 2.0
+    a1 = a0 + step
+    ov = Image.new("RGBA", (N, N), (0, 0, 0, 0))
+    d = ImageDraw.Draw(ov)
+    fill = (0, 92, 168, 255)
+    if n == 1:
+        d.ellipse((c - ro, c - ro, c + ro, c + ro), fill=fill)
+    else:
+        d.pieslice((c - ro, c - ro, c + ro, c + ro), a0, a1, fill=fill)
+    d.ellipse((c - ri, c - ri, c + ri, c + ri), fill=(0, 0, 0, 0))
+    if n == 1:
+        d.ellipse((c - ro + SS, c - ro + SS, c + ro - SS, c + ro - SS),
+                  outline=WHEEL_ACCENT, width=5 * SS)
+    else:
+        d.arc((c - ro + SS, c - ro + SS, c + ro - SS, c + ro - SS),
+              a0 + 1.0, a1 - 1.0, fill=WHEEL_ACCENT, width=5 * SS)
+    a = math.radians(-90 + i * step)
+    tx = c + r_mid * SS * math.cos(a)
+    ty = c + r_mid * SS * math.sin(a)
+    hole = (tok + 3) * SS
+    d.ellipse((tx - hole, ty - hole, tx + hole, ty + hole), fill=(0, 0, 0, 0))
+    rr = (tok + 6) * SS
+    d.ellipse((tx - rr, ty - rr, tx + rr, ty + rr),
+              outline=WHEEL_ACCENT, width=3 * SS)
+    return ov.resize((size, size), Image.LANCZOS)
+
+
+def compose_wheel_frame(base, overlay):
+    """Image finale : fond + (surbrillance) + jetons."""
+    im = base["bg"].copy()
+    if overlay is not None:
+        im.alpha_composite(overlay)
+    im.alpha_composite(base["tokens"])
+    return im
+# ==== ROUE DES PERSONNAGES : FIN ====
 
 
 def normalize_class(txt):
@@ -763,6 +971,7 @@ class App:
         self.tick()
         self.watch_foreground()
         self.sync_active_window()
+        self.wheel_init()
 
         # vérification des mises à jour GitHub (2 s après le démarrage,
         # en arrière-plan, silencieuse si pas d'internet)
@@ -809,7 +1018,8 @@ class App:
         cfg = {"hk_next": "F1", "hk_prev": "F2", "topmost": True, "order": [],
                "notify_session": True, "direct_mod": "Alt", "auto_update": True, "break_reminder": True,
                "minibar": True, "auto_focus_first": True,
-               "minibar_locked": False, "minibar_pos": None}
+               "minibar_locked": False, "minibar_pos": None,
+               "wheel_enabled": True, "wheel_vk": 0x05}
         try:
             with open(config_path(), "r", encoding="utf-8") as f:
                 cfg.update(json.load(f))
@@ -1453,6 +1663,17 @@ class App:
         pj.add_cascade(label="Touche d'accès direct (1-8)", menu=dm)
         m.add_cascade(label="Personnages", menu=pj)
 
+        # ▸ Roue des personnages
+        wh = self._submenu(m)
+        self.var_wheel = tk.BooleanVar(
+            value=self.cfg.get("wheel_enabled", True))
+        wh.add_checkbutton(label="Activer la roue", variable=self.var_wheel,
+                           command=self.on_toggle_wheel,
+                           selectcolor=C_ACCENT)
+        wh.add_command(label="Choisir la touche…",
+                       command=self.wheel_pick_key)
+        m.add_cascade(label="Roue des personnages", menu=wh)
+
         # ▸ Notifications
         nt = self._submenu(m)
         self.var_notify = tk.BooleanVar(
@@ -1864,6 +2085,444 @@ class App:
         self.root.after(50, self.apply_win11_corners)
 
     # ---------------- boucle ----------------
+    # ---------------- roue des personnages ----------------
+    def wheel_init(self):
+        """Prépare la roue : fenêtre (créée peu après le démarrage) et
+        surveillance de la touche / du bouton de souris choisi."""
+        self._wheel = None            # fenêtre Toplevel de la roue
+        self._wheel_hwnd = 0
+        self._wheel_canvas = None
+        self._wheel_open = False      # roue actuellement affichée
+        self._wheel_down = False      # état précédent de la touche
+        self._wheel_capturing = False  # sélecteur de touche ouvert
+        self._wheel_dlg = None
+        self._wheel_sig = None        # signature des persos du cache
+        self._wheel_base = None
+        self._wheel_frames = {}
+        self._wheel_overlays = {}
+        self._wheel_names = []
+        self._wheel_idx = -2
+        self._wheel_cx = self._wheel_cy = 0
+        self._wheel_tick = 0
+        self._wheel_fonts = {}
+        self._wheel_warming = False
+        self._wheel_retry = 0
+        self._wheel_next_retry = 0.0
+        self.root.after(1200, self._wheel_build_window)
+        self.root.after(1500, self._wheel_poll)
+
+    def _wheel_build_window(self):
+        """Fenêtre de la roue : sans bordure, au premier plan, transparente
+        autour du disque, qui ne prend JAMAIS le focus et laisse passer les
+        clics. Créée une fois, puis simplement cachée/montrée."""
+        if not PIL_OK or self._wheel is not None:
+            return
+        try:
+            w = tk.Toplevel(self.root)
+            w.overrideredirect(True)
+            w.attributes("-topmost", True)
+            w.attributes("-transparentcolor", WHEEL_KEY)
+            w.geometry(f"{WHEEL_SIZE}x{WHEEL_SIZE}+-4000+-4000")
+            cv = tk.Canvas(w, width=WHEEL_SIZE, height=WHEEL_SIZE,
+                           bg=WHEEL_KEY, bd=0, highlightthickness=0)
+            cv.pack()
+            mid = WHEEL_SIZE // 2
+            self._wheel_img = cv.create_image(mid, mid, image="")
+            # pseudo : largeur = diamètre de la zone centrale (retour à la
+            # ligne automatique pour les très longs pseudos)
+            self._wheel_txt = cv.create_text(
+                mid, mid, text="", fill="#ffffff", width=WHEEL_R_IN * 2 - 14,
+                justify="center", font=("Segoe UI", 11, "bold"))
+            self._wheel_sub = cv.create_text(
+                mid, mid, text="", fill=C_TEXT_2, font=("Segoe UI", 9))
+            w.update_idletasks()
+            hwnd = GetAncestor(int(w.winfo_id()), 2) or int(w.winfo_id())
+            get_style = getattr(user32, "GetWindowLongPtrW",
+                                user32.GetWindowLongW)
+            set_style = getattr(user32, "SetWindowLongPtrW",
+                                user32.SetWindowLongW)
+            # NOACTIVATE | TOOLWINDOW | TRANSPARENT (clics traversants)
+            set_style(hwnd, -20, get_style(hwnd, -20)
+                      | 0x08000000 | 0x80 | 0x20)
+            user32.ShowWindow(hwnd, 0)   # SW_HIDE
+            self._wheel, self._wheel_canvas = w, cv
+            self._wheel_hwnd = hwnd
+        except Exception:
+            self._wheel = None
+
+    def _wheel_context_ok(self):
+        """La roue ne s'ouvre que depuis une fenêtre Dofus (ou Kali) : une
+        touche choisie ici ne doit pas se déclencher dans le navigateur."""
+        fg = GetForegroundWindow()
+        if not fg:
+            return False
+        if fg in self.windows.values():
+            return True
+        for w in (self.root, self.mb):
+            if w is None:
+                continue
+            try:
+                h = int(w.winfo_id())
+                if fg == h or fg == GetAncestor(h, 2):
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def _wheel_signature(self):
+        sig = []
+        for n in self.order:
+            col = CLASS_STYLE.get(self.klass.get(n, ""), CLASS_DEFAULT)[1]
+            sig.append((n, self.windows.get(n), col))
+        return tuple(sig)
+
+    def _wheel_ensure(self):
+        """(Re)construit les calques si les persos ont changé, ou si des
+        icônes manquaient (Dofus pas encore prêt) : réessai toutes les 2 s,
+        8 fois au plus."""
+        sig = self._wheel_signature()
+        if not sig:
+            return False
+        base = self._wheel_base
+        same = (sig == self._wheel_sig and base is not None)
+        if same and (base["complete"] or time.time() < self._wheel_next_retry):
+            return True
+        if not same:
+            self._wheel_retry = 0
+        base = build_wheel_base([(hw, col) for _, hw, col in sig])
+        self._wheel_base = base
+        self._wheel_sig = sig
+        self._wheel_frames = {}
+        self._wheel_overlays = {}
+        if base["complete"]:
+            self._wheel_next_retry = 0.0
+        else:
+            self._wheel_retry += 1
+            self._wheel_next_retry = time.time() + (
+                2.0 if self._wheel_retry < 8 else 1e12)
+        return True
+
+    def _wheel_frame(self, idx):
+        """Image Tk de la roue avec le secteur idx en surbrillance
+        (idx = -1 : aucun). Mise en cache."""
+        f = self._wheel_frames.get(idx)
+        if f is not None:
+            return f
+        ov = None
+        if idx >= 0:
+            ov = self._wheel_overlays.get(idx)
+            if ov is None:
+                ov = build_wheel_overlay(len(self._wheel_sig), idx)
+                self._wheel_overlays[idx] = ov
+        f = ImageTk.PhotoImage(compose_wheel_frame(self._wheel_base, ov))
+        self._wheel_frames[idx] = f
+        return f
+
+    def _wheel_needs_warm(self):
+        sig = self._wheel_signature()
+        if not sig:
+            return False
+        if sig != self._wheel_sig or self._wheel_base is None:
+            return True
+        if (not self._wheel_base["complete"]
+                and time.time() >= self._wheel_next_retry):
+            return True
+        return len(self._wheel_frames) < len(sig) + 1
+
+    def _wheel_warm_step(self):
+        """Pré-calcule les images de la roue, une par une, pendant les
+        moments calmes : à l'ouverture tout est déjà prêt (fluidité)."""
+        try:
+            if self._wheel_open or self._wheel_capturing or self._wheel is None:
+                self._wheel_warming = False
+                return
+            if not self._wheel_ensure():
+                self._wheel_warming = False
+                return
+            for idx in range(-1, len(self._wheel_sig)):
+                if idx not in self._wheel_frames:
+                    self._wheel_frame(idx)
+                    self.root.after(35, self._wheel_warm_step)
+                    return
+            self._wheel_warming = False
+        except Exception:
+            self._wheel_warming = False
+
+    def _wheel_set(self, idx):
+        """Affiche la roue avec le secteur idx en surbrillance."""
+        self._wheel_idx = idx
+        cv = self._wheel_canvas
+        cv.itemconfig(self._wheel_img, image=self._wheel_frame(idx))
+        if 0 <= idx < len(self._wheel_names):
+            name = self._wheel_names[idx]
+            cls = self.klass.get(name, "")
+            text, fnt = self._wheel_fit_name(name)
+            cv.itemconfig(self._wheel_txt, text=text, font=fnt)
+            cv.itemconfig(self._wheel_sub,
+                          text=WHEEL_CLASS_LABEL.get(cls, cls.capitalize()),
+                          fill=CLASS_STYLE.get(cls, CLASS_DEFAULT)[1])
+        else:
+            cv.itemconfig(self._wheel_txt, text="Annuler",
+                          font=self._wheel_font(11))
+            cv.itemconfig(self._wheel_sub, text="")
+        self._wheel_place_texts()
+        cv.update_idletasks()
+
+    def _wheel_place_texts(self):
+        """Centre verticalement pseudo (1 ou 2 lignes) + classe dans le
+        disque central, quelle que soit la longueur du pseudo."""
+        cv = self._wheel_canvas
+        mid = WHEEL_SIZE // 2
+        cv.coords(self._wheel_txt, mid, mid)
+        b = cv.bbox(self._wheel_txt)
+        nh = (b[3] - b[1]) if b else 16
+        has_sub = bool(cv.itemcget(self._wheel_sub, "text"))
+        sh = 13 if has_sub else 0
+        total = nh + (sh + 2 if has_sub else 0)
+        top = mid - total / 2.0
+        cv.coords(self._wheel_txt, mid, top + nh / 2.0)
+        if has_sub:
+            cv.coords(self._wheel_sub, mid, top + nh + 2 + sh / 2.0)
+
+    def _wheel_font(self, size):
+        f = self._wheel_fonts.get(size)
+        if f is None:
+            f = tkfont.Font(family="Segoe UI", size=size, weight="bold")
+            self._wheel_fonts[size] = f
+        return f
+
+    def _wheel_fit_name(self, name):
+        """Mise en forme du pseudo dans le disque central : la plus grande
+        police (11 -> 9) pour laquelle il tient sur UNE ligne ; sinon coupure
+        propre à un tiret / espace / _ ; en dernier recours police 8."""
+        W = WHEEL_R_IN * 2 - 22
+        for s in (11, 10, 9):
+            if self._wheel_font(s).measure(name) <= W:
+                return name, self._wheel_font(s)
+        cuts = [i for i, ch in enumerate(name)
+                if ch in "- _" and 0 < i < len(name) - 1]
+        if cuts:
+            mid = len(name) / 2.0
+            i = min(cuts, key=lambda k: abs(k - mid))
+            a = name[:i + 1].rstrip()
+            b = name[i + 1:].lstrip()
+            for s in (11, 10, 9):
+                f = self._wheel_font(s)
+                if max(f.measure(a), f.measure(b)) <= W:
+                    return a + "\n" + b, f
+        return name, self._wheel_font(8)
+
+    def _wheel_show(self):
+        if self._wheel is None or not self.order or not self._wheel_ensure():
+            return
+        self._wheel_names = [s[0] for s in self._wheel_sig]
+        pt = wt.POINT()
+        user32.GetCursorPos(ctypes.byref(pt))
+        vx, vy = user32.GetSystemMetrics(76), user32.GetSystemMetrics(77)
+        vw, vh = user32.GetSystemMetrics(78), user32.GetSystemMetrics(79)
+        half = WHEEL_SIZE // 2
+        # roue centrée sur le curseur, gardée entièrement à l'écran
+        cx = max(vx + half, min(pt.x, vx + vw - half))
+        cy = max(vy + half, min(pt.y, vy + vh - half))
+        if (cx, cy) != (pt.x, pt.y):
+            user32.SetCursorPos(cx, cy)
+        self._wheel_cx, self._wheel_cy = cx, cy
+        self._wheel_set(-1)
+        _SetWindowPos(self._wheel_hwnd, wt.HWND(-1), cx - half, cy - half,
+                      WHEEL_SIZE, WHEEL_SIZE, 0x10 | 0x40)  # NOACTIVATE|SHOW
+        self._wheel_open = True
+
+    def _wheel_update(self):
+        pt = wt.POINT()
+        user32.GetCursorPos(ctypes.byref(pt))
+        idx = wheel_sector_at(pt.x - self._wheel_cx, pt.y - self._wheel_cy,
+                              len(self._wheel_names))
+        if idx != self._wheel_idx:
+            self._wheel_set(idx)
+
+    def _wheel_close(self, select):
+        """Ferme la roue ; si select, passe sur le perso visé."""
+        if not self._wheel_open:
+            return
+        self._wheel_open = False
+        idx, names = self._wheel_idx, list(self._wheel_names)
+        try:
+            user32.ShowWindow(self._wheel_hwnd, 0)   # SW_HIDE
+        except Exception:
+            pass
+        if select and 0 <= idx < len(names):
+            try:
+                self.go_to(self.order.index(names[idx]))
+            except Exception:
+                pass
+
+    def _wheel_poll(self):
+        """Surveille la touche de la roue (clavier ou souris) : appui = la
+        roue s'ouvre, maintien = on vise, relâchement = on choisit."""
+        delay = 20
+        try:
+            vk = int(self.cfg.get("wheel_vk", 0) or 0)
+            down = bool(GetAsyncKeyState(vk) & 0x8000) if vk > 0 else False
+            on = (bool(self.cfg.get("wheel_enabled", True)) and vk > 0
+                  and PIL_OK and self._wheel is not None)
+            if self._wheel_capturing:
+                self._wheel_down = down
+            elif not on:
+                if self._wheel_open:
+                    self._wheel_close(False)
+                self._wheel_down = down
+            elif self._wheel_open:
+                delay = 12
+                if down:
+                    self._wheel_update()
+                else:
+                    self._wheel_close(True)
+                self._wheel_down = down
+            else:
+                if (down and not self._wheel_down and self.order
+                        and self._wheel_context_ok()):
+                    self._wheel_down = True
+                    self._wheel_show()
+                    delay = 12
+                self._wheel_down = down
+                self._wheel_tick += 1
+                if self._wheel_tick >= 25:        # ~ toutes les 0,5 s
+                    self._wheel_tick = 0
+                    if (self.order and not self._wheel_warming
+                            and self._wheel_needs_warm()):
+                        self._wheel_warming = True
+                        self.root.after(10, self._wheel_warm_step)
+        except Exception:
+            self._wheel_down = True   # évite de reboucler tant que la touche est tenue
+            try:
+                self._wheel_close(False)
+            except Exception:
+                pass
+        self.root.after(delay, self._wheel_poll)
+
+    def on_toggle_wheel(self):
+        self.cfg["wheel_enabled"] = self.var_wheel.get()
+        self.save_config()
+        if not self.cfg["wheel_enabled"] and self._wheel_open:
+            self._wheel_close(False)
+
+    def wheel_pick_key(self):
+        """Fenêtre « appuie sur la touche à utiliser » : accepte toute touche
+        du clavier et tous les boutons de souris (latéraux compris)."""
+        if not PIL_OK:
+            messagebox.showinfo(
+                APP_TITLE,
+                "La roue a besoin du rendu d'images (Pillow), indisponible "
+                "dans cette installation. Voir ⚙ > Diagnostic.")
+            return
+        if self._wheel_dlg is not None:
+            try:
+                self._wheel_dlg.lift()
+                self._wheel_dlg.focus_force()
+                return
+            except Exception:
+                self._wheel_dlg = None
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Roue des personnages")
+        dlg.configure(bg=C_BG)
+        dlg.resizable(False, False)
+        dlg.attributes("-topmost", True)
+        try:   # barre de titre sombre (Windows 11)
+            dlg.update_idletasks()
+            h = GetAncestor(int(dlg.winfo_id()), 2) or int(dlg.winfo_id())
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                h, 20, ctypes.byref(ctypes.c_int(1)), 4)
+        except Exception:
+            pass
+        tk.Label(dlg, text="Touche d'ouverture de la roue", bg=C_BG,
+                 fg=C_TEXT, font=self.f_title).pack(padx=26, pady=(18, 4))
+        tk.Label(dlg, justify="center", bg=C_BG, fg=C_TEXT_2,
+                 font=self.f_small,
+                 text="Appuie maintenant sur la touche ou le bouton de souris\n"
+                      "à utiliser (boutons latéraux acceptés).\n"
+                      "Maintiens-le pour ouvrir la roue, relâche pour choisir."
+                 ).pack(padx=26)
+        key_lbl = tk.Label(dlg, bg=C_CARD, fg=C_ACCENT, font=self.f_title,
+                           padx=16, pady=10)
+        key_lbl.pack(padx=26, pady=12, fill="x")
+        warn = tk.Label(dlg, text="", bg=C_BG, fg="#e8a23c", font=self.f_small,
+                        wraplength=300, justify="center")
+        warn.pack(padx=26)
+
+        def refresh():
+            vk = int(self.cfg.get("wheel_vk", 0) or 0)
+            enabled = bool(self.cfg.get("wheel_enabled", True)) and vk > 0
+            key_lbl.configure(text=vk_name(vk) if enabled else "Roue désactivée")
+            warn.configure(
+                text="Cette touche sert aussi en jeu (chat, déplacements) : "
+                     "la roue s'ouvrira à chaque appui. Un bouton latéral de "
+                     "souris ou une touche F est plus confortable."
+                if enabled and vk_is_risky(vk) else "")
+
+        def disable():
+            self.cfg["wheel_enabled"] = False
+            self.save_config()
+            self.var_wheel.set(False)
+            refresh()
+
+        row = tk.Frame(dlg, bg=C_BG)
+        row.pack(pady=(10, 18))
+        for txt, cmd in (("Désactiver la roue", disable),
+                         ("Fermer", self._wheel_dialog_close)):
+            tk.Button(row, text=txt, command=cmd, bg=C_CARD, fg=C_TEXT,
+                      activebackground=C_ACCENT_D, activeforeground=C_TEXT,
+                      relief="flat", bd=0, padx=14, pady=6,
+                      font=self.f_small, cursor="hand2"
+                      ).pack(side="left", padx=6)
+        dlg.bind("<Escape>", lambda e: self._wheel_dialog_close())
+        dlg.protocol("WM_DELETE_WINDOW", self._wheel_dialog_close)
+        refresh()
+        dlg.update_idletasks()
+        sw, sh = dlg.winfo_screenwidth(), dlg.winfo_screenheight()
+        dlg.geometry(f"+{(sw - dlg.winfo_reqwidth()) // 2}"
+                     f"+{(sh - dlg.winfo_reqheight()) // 3}")
+        self._wheel_dlg = dlg
+        self._wheel_dlg_refresh = refresh
+        self._wheel_capturing = True
+        # touches déjà enfoncées à l'ouverture : ignorées jusqu'au relâchement
+        self._wheel_cap_prev = {
+            vk for vk in range(0x04, 0xFF)
+            if vk not in WHEEL_EXCLUDED_KEYS
+            and GetAsyncKeyState(vk) & 0x8000}
+        dlg.after(150, self._wheel_capture_poll)
+
+    def _wheel_capture_poll(self):
+        dlg = self._wheel_dlg
+        if dlg is None:
+            return
+        try:
+            if not dlg.winfo_exists():
+                self._wheel_dialog_close()
+                return
+            down = {vk for vk in range(0x04, 0xFF)
+                    if vk not in WHEEL_EXCLUDED_KEYS
+                    and GetAsyncKeyState(vk) & 0x8000}
+            new = down - self._wheel_cap_prev
+            self._wheel_cap_prev = down
+            if new:
+                self.cfg["wheel_vk"] = min(new)
+                self.cfg["wheel_enabled"] = True
+                self.save_config()
+                self.var_wheel.set(True)
+                self._wheel_dlg_refresh()
+            dlg.after(30, self._wheel_capture_poll)
+        except Exception:
+            self._wheel_dialog_close()
+
+    def _wheel_dialog_close(self):
+        self._wheel_capturing = False
+        dlg, self._wheel_dlg = self._wheel_dlg, None
+        if dlg is not None:
+            try:
+                dlg.destroy()
+            except Exception:
+                pass
+
     def tick(self):
         # rafraîchit automatiquement si une fenêtre a disparu/apparu.
         # Entièrement protégé : une fenêtre Dofus qui crashe pendant
