@@ -29,6 +29,16 @@ import urllib.request
 from tkinter import font as tkfont
 from tkinter import messagebox
 
+# modules de diagnostic : protégés, pour qu'un exe sans eux démarre quand même
+try:
+    import traceback
+except Exception:
+    traceback = None
+try:
+    import faulthandler
+except Exception:
+    faulthandler = None
+
 # --- Mise à jour automatique via GitHub ---
 # Le compte a été renommé Skiiouw -> Skiouw-Dev : on essaie la nouvelle
 # adresse en premier, l'ancienne en secours (redirection éventuelle).
@@ -76,6 +86,7 @@ _SetWindowPos.restype = wt.BOOL
 GetWindowThreadProcessId = user32.GetWindowThreadProcessId
 AttachThreadInput = user32.AttachThreadInput
 BringWindowToTop = user32.BringWindowToTop
+IsHungAppWindow = user32.IsHungAppWindow
 RegisterHotKey = user32.RegisterHotKey
 UnregisterHotKey = user32.UnregisterHotKey
 GetMessageW = user32.GetMessageW
@@ -107,7 +118,7 @@ VK_CODES = {
 }
 
 APP_TITLE = "Kali"
-APP_VERSION = "4.7"
+APP_VERSION = "4.9"
 
 # Style par classe : (glyphe d'arme stylisé, couleur) — dessins génériques,
 # aucune ressource Ankama. Détecté depuis le titre "Nom - Classe - ...".
@@ -156,8 +167,10 @@ _WICON_CACHE = {}
 try:
     from PIL import Image, ImageDraw, ImageTk
     PIL_OK = True
-except Exception:
+    PIL_ERROR = ""
+except Exception as _pil_exc:
     PIL_OK = False
+    PIL_ERROR = f"{type(_pil_exc).__name__}: {_pil_exc}"
 
 
 class BITMAPINFOHEADER(ctypes.Structure):
@@ -190,10 +203,19 @@ def get_window_hicon(hwnd):
 
 
 def _hicon_to_rgba(hicon, cap):
-    """Rend l'icône dans un buffer BGRA `cap`x`cap`. Retourne bytes ou None."""
+    """Rend l'icône dans un buffer BGRA `cap`x`cap`. Retourne bytes ou None.
+
+    Sûr sous forte charge GDI : chaque ressource est vérifiée (CreateDIBSection
+    peut échouer et renvoyer un pointeur NULL ; lire ce pointeur ferait planter
+    tout le processus) et le nettoyage est garanti par `finally`."""
+    hdc = mem = hbmp = oldobj = None
     try:
         hdc = user32.GetDC(0)
+        if not hdc:
+            return None
         mem = gdi32.CreateCompatibleDC(hdc)
+        if not mem:
+            return None
         bmi = BITMAPINFOHEADER()
         bmi.biSize = ctypes.sizeof(BITMAPINFOHEADER)
         bmi.biWidth, bmi.biHeight = cap, -cap
@@ -201,17 +223,25 @@ def _hicon_to_rgba(hicon, cap):
         bits = ctypes.c_void_p()
         hbmp = gdi32.CreateDIBSection(mem, ctypes.byref(bmi), 0,
                                       ctypes.byref(bits), None, 0)
+        if not hbmp or not bits.value:
+            return None
         oldobj = gdi32.SelectObject(mem, hbmp)
-        # fond noir transparent (alpha=0) : on lit l'alpha réel de l'icône
         user32.DrawIconEx(mem, 0, 0, hicon, cap, cap, 0, None, 3)
-        raw = ctypes.string_at(bits.value, cap * cap * 4)
-        gdi32.SelectObject(mem, oldobj)
-        gdi32.DeleteObject(hbmp)
-        gdi32.DeleteDC(mem)
-        user32.ReleaseDC(0, hdc)
-        return raw
+        return ctypes.string_at(bits.value, cap * cap * 4)
     except Exception:
         return None
+    finally:
+        try:
+            if mem and oldobj:
+                gdi32.SelectObject(mem, oldobj)
+            if hbmp:
+                gdi32.DeleteObject(hbmp)
+            if mem:
+                gdi32.DeleteDC(mem)
+            if hdc:
+                user32.ReleaseDC(0, hdc)
+        except Exception:
+            pass
 
 
 def window_icon_pil(hwnd, size):
@@ -590,6 +620,159 @@ def config_path():
     return os.path.join(base, "config.json")
 
 
+_START_TIME = time.time()
+_LOG_FILE = None
+_LOG_BUDGET = 1000000      # octets max écrits par session (anti-boucle d'erreurs)
+
+
+def log_path():
+    return os.path.join(os.path.dirname(config_path()), "kali.log")
+
+
+def log_line(text):
+    """Ajoute une ligne horodatée au journal. Ne lève jamais d'exception."""
+    global _LOG_BUDGET
+    try:
+        if _LOG_FILE is None or _LOG_BUDGET <= 0:
+            return
+        line = time.strftime("%Y-%m-%d %H:%M:%S ") + text + "\n"
+        _LOG_BUDGET -= len(line)
+        _LOG_FILE.write(line)
+        _LOG_FILE.flush()
+    except Exception:
+        pass
+
+
+def setup_crash_log():
+    """Journal %APPDATA%\\Kali\\kali.log : démarrage / arrêt propre, exceptions
+    non gérées (fil principal, threads, callbacks Tk) et plantages natifs
+    (faulthandler). Sert à savoir si Kali a planté lui-même ou si le problème
+    vient d'ailleurs (pilote graphique, alimentation...)."""
+    global _LOG_FILE
+    try:
+        p = log_path()
+        try:
+            if os.path.getsize(p) > 512 * 1024:
+                os.replace(p, p + ".old")
+        except OSError:
+            pass
+        _LOG_FILE = open(p, "a", encoding="utf-8", buffering=1)
+        log_line(f"=== Kali {APP_VERSION} démarré (PID {os.getpid()}) ===")
+        try:   # isolé : ces infos ne doivent jamais désactiver le journal
+            log_line(f"Programme : {sys.executable}")
+            log_line("Pillow : " + ("actif" if PIL_OK
+                                    else f"INDISPONIBLE ({PIL_ERROR})"))
+        except Exception:
+            pass
+        if faulthandler is not None:
+            faulthandler.enable(file=_LOG_FILE, all_threads=True)
+        if traceback is not None:
+            def _hook(et, ev, tb):
+                log_line("Exception non gérée :\n"
+                         + "".join(traceback.format_exception(et, ev, tb)))
+            sys.excepthook = _hook
+
+            def _thook(args):
+                log_line("Exception dans un thread :\n" + "".join(
+                    traceback.format_exception(args.exc_type, args.exc_value,
+                                               args.exc_traceback)))
+            threading.excepthook = _thook
+    except Exception:
+        _LOG_FILE = None
+
+
+def process_stats():
+    """Ressources de Kali : mémoire (Mo), handles, objets GDI et USER.
+    Si ces chiffres montent sans jamais redescendre, c'est une fuite."""
+    out = {}
+    try:
+        k32 = ctypes.WinDLL("kernel32")
+        u32 = ctypes.WinDLL("user32")
+        k32.GetCurrentProcess.restype = wt.HANDLE
+        h = k32.GetCurrentProcess()
+        u32.GetGuiResources.argtypes = [wt.HANDLE, wt.DWORD]
+        u32.GetGuiResources.restype = wt.DWORD
+        out["gdi"] = u32.GetGuiResources(h, 0)
+        out["user"] = u32.GetGuiResources(h, 1)
+        cnt = wt.DWORD()
+        k32.GetProcessHandleCount.argtypes = [wt.HANDLE,
+                                              ctypes.POINTER(wt.DWORD)]
+        if k32.GetProcessHandleCount(h, ctypes.byref(cnt)):
+            out["handles"] = cnt.value
+
+        class PMC(ctypes.Structure):
+            _fields_ = [("cb", wt.DWORD), ("PageFaultCount", wt.DWORD),
+                        ("PeakWorkingSetSize", ctypes.c_size_t),
+                        ("WorkingSetSize", ctypes.c_size_t),
+                        ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                        ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                        ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                        ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                        ("PagefileUsage", ctypes.c_size_t),
+                        ("PeakPagefileUsage", ctypes.c_size_t)]
+        pmc = PMC()
+        pmc.cb = ctypes.sizeof(PMC)
+        ps = ctypes.WinDLL("psapi")
+        ps.GetProcessMemoryInfo.argtypes = [wt.HANDLE, ctypes.POINTER(PMC),
+                                            wt.DWORD]
+        if ps.GetProcessMemoryInfo(h, ctypes.byref(pmc), pmc.cb):
+            out["mem"] = pmc.WorkingSetSize / 1048576.0
+    except Exception:
+        pass
+    return out
+
+
+def exe_has_pillow(path):
+    """Heuristique : cet exe PyInstaller embarque-t-il Pillow ? La table des
+    matières de l'archive (fin du fichier) liste en clair les modules
+    embarqués ; on y cherche l'extension native de Pillow."""
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            f.seek(max(0, size - 6 * 1024 * 1024))
+            return b"_imaging" in f.read()
+    except Exception:
+        return False
+
+
+def find_other_kali_exes():
+    """Autres Kali.exe connus que celui qui tourne : installation standard
+    et entrées de démarrage automatique (lecture seule, rien n'est modifié)."""
+    cands = []
+    for var, sub in (("ProgramFiles", "Kali"), ("ProgramFiles(x86)", "Kali"),
+                     ("LOCALAPPDATA", os.path.join("Programs", "Kali"))):
+        base = os.environ.get(var)
+        if base:
+            cands.append(os.path.join(base, sub, "Kali.exe"))
+    try:
+        import winreg
+        for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+            try:
+                with winreg.OpenKey(
+                        root, r"Software\Microsoft\Windows\CurrentVersion\Run"
+                ) as k:
+                    i = 0
+                    while True:
+                        name, val, _t = winreg.EnumValue(k, i)
+                        i += 1
+                        if "kali" in (name + str(val)).lower():
+                            m = re.search(r'[A-Za-z]:\\[^"]*?\.exe', str(val))
+                            if m:
+                                cands.append(m.group(0))
+            except OSError:
+                pass
+    except Exception:
+        pass
+    me = os.path.normcase(os.path.abspath(sys.executable))
+    out, seen = [], {me}
+    for p in cands:
+        key = os.path.normcase(os.path.abspath(p))
+        if key not in seen and os.path.isfile(p):
+            seen.add(key)
+            out.append(p)
+    return out
+
+
 def get_window_title(hwnd):
     n = GetWindowTextLengthW(hwnd)
     if n == 0:
@@ -599,23 +782,41 @@ def get_window_title(hwnd):
     return buf.value
 
 
+_EXE_CACHE = {}    # (hwnd, pid) -> (exe, expiration)
+
+
 def get_process_exe(hwnd):
-    """Retourne le nom de l'exécutable (ex: 'dofus.exe') de la fenêtre."""
+    """Retourne le nom de l'exécutable (ex: 'dofus.exe') de la fenêtre.
+
+    Résultat mis en cache 30 s : sans ça, Kali ouvrait un handle sur CHAQUE
+    application ayant une fenêtre visible toutes les 3 secondes (antivirus
+    et logiciels de surcouche n'aiment pas ce genre de balayage répété)."""
     pid = wt.DWORD()
     GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
     if not pid.value:
         return ""
+    key = (hwnd, pid.value)
+    now = time.monotonic()
+    hit = _EXE_CACHE.get(key)
+    if hit and hit[1] > now:
+        return hit[0]
+    exe = ""
     h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
-    if not h:
-        return ""
-    try:
-        size = wt.DWORD(1024)
-        buf = ctypes.create_unicode_buffer(size.value)
-        if QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
-            return os.path.basename(buf.value).lower()
-        return ""
-    finally:
-        CloseHandle(h)
+    if h:
+        try:
+            size = wt.DWORD(1024)
+            buf = ctypes.create_unicode_buffer(size.value)
+            if QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+                exe = os.path.basename(buf.value).lower()
+        finally:
+            CloseHandle(h)
+    if len(_EXE_CACHE) > 400:
+        for k in [k for k, v in _EXE_CACHE.items() if v[1] <= now]:
+            _EXE_CACHE.pop(k, None)
+        if len(_EXE_CACHE) > 400:
+            _EXE_CACHE.clear()
+    _EXE_CACHE[key] = (exe, now + (30.0 if exe else 5.0))
+    return exe
 
 
 def get_window_class(hwnd):
@@ -677,20 +878,40 @@ def enum_dofus_windows():
 
 
 def focus_window(hwnd):
-    """Donne le focus à une fenêtre, même depuis une autre appli plein écran."""
+    """Donne le focus à une fenêtre, même depuis une autre appli plein écran.
+
+    Prudent par conception : on tente d'abord un simple SetForegroundWindow.
+    Le « truc » AttachThreadInput (qui relie TEMPORAIREMENT la file d'entrée
+    de Kali à celle des autres applis) n'est qu'un dernier recours :
+      - jamais si une des fenêtres concernées ne répond pas (le blocage se
+        propagerait à l'application au premier plan : fenêtres figées) ;
+      - détachement garanti par `finally`, même en cas d'erreur."""
     try:
+        if not IsWindow(hwnd):
+            return
         if IsIconic(hwnd):
             ShowWindow(hwnd, SW_RESTORE)
+        SetForegroundWindow(hwnd)
+        if GetForegroundWindow() == hwnd or IsHungAppWindow(hwnd):
+            return
         fg = GetForegroundWindow()
         cur_tid = kernel32.GetCurrentThreadId()
-        fg_tid = GetWindowThreadProcessId(fg, None)
-        target_tid = GetWindowThreadProcessId(hwnd, None)
-        AttachThreadInput(cur_tid, fg_tid, True)
-        AttachThreadInput(cur_tid, target_tid, True)
-        BringWindowToTop(hwnd)
-        SetForegroundWindow(hwnd)
-        AttachThreadInput(cur_tid, fg_tid, False)
-        AttachThreadInput(cur_tid, target_tid, False)
+        tids = []
+        if fg and not IsHungAppWindow(fg):
+            tids.append(GetWindowThreadProcessId(fg, None))
+        tids.append(GetWindowThreadProcessId(hwnd, None))
+        tids = [t for i, t in enumerate(tids)
+                if t and t != cur_tid and t not in tids[:i]]
+        attached = []
+        try:
+            for t in tids:
+                if AttachThreadInput(cur_tid, t, True):
+                    attached.append(t)
+            BringWindowToTop(hwnd)
+            SetForegroundWindow(hwnd)
+        finally:
+            for t in attached:
+                AttachThreadInput(cur_tid, t, False)
     except Exception:
         pass
 
@@ -769,6 +990,8 @@ class TrayThread(threading.Thread):
         self._visible = False
         self._notif = None
         self._notif_lock = threading.Lock()
+        self._hicon = None
+        self._taskbar_msg = 0
 
     def notify(self, title, message):
         """Affiche une notification Windows depuis l'icône de zone de notif."""
@@ -801,8 +1024,30 @@ class TrayThread(threading.Thread):
         if self.hwnd:
             user32.PostMessageW(self.hwnd, self.MSG_HIDE, 0, 0)
 
+    def _on_taskbar_created(self):
+        """L'Explorateur a (re)démarré (plantage...) : les icônes de la zone
+        de notification ont disparu -> on remet la nôtre si elle devait être
+        affichée."""
+        if self._visible:
+            self._visible = False
+            self._add()
+
+    def remove_now(self):
+        """Retire l'icône IMMÉDIATEMENT (fermeture / redémarrage de Kali) :
+        sans ça, une icône fantôme restait affichée jusqu'au survol."""
+        try:
+            self._remove()
+        except Exception:
+            pass
+
     # --- interne ---
     def _load_icon(self):
+        # chargée UNE seule fois : sinon une icône GDI fuyait à chaque réduction
+        if not self._hicon:
+            self._hicon = self._load_icon_raw()
+        return self._hicon
+
+    def _load_icon_raw(self):
         # 1) .ico du dossier de mises à jour (permet de changer d'icône
         #    sans recompiler : il suffit d'y déposer un nouveau .ico)
         upd = os.path.join(os.path.dirname(config_path()), "kali.ico")
@@ -869,6 +1114,8 @@ class TrayThread(threading.Thread):
                                      wt.WPARAM, wt.LPARAM)
         user32.DefWindowProcW.restype = ctypes.c_ssize_t
         user32.DefWindowProcW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
+        # message envoyé à tous quand l'Explorateur (re)démarre
+        self._taskbar_msg = user32.RegisterWindowMessageW("TaskbarCreated")
 
         def wndproc(hwnd, msg, wp, lp):
             if msg == self.WM_TRAY:
@@ -885,6 +1132,9 @@ class TrayThread(threading.Thread):
                 return 0
             if msg == self.MSG_NOTIFY:
                 self._do_notify()
+                return 0
+            if self._taskbar_msg and msg == self._taskbar_msg:
+                self._on_taskbar_created()
                 return 0
             return user32.DefWindowProcW(hwnd, msg, wp, lp)
 
@@ -936,6 +1186,7 @@ class App:
 
     def __init__(self):
         self.root = tk.Tk()
+        self.root.report_callback_exception = self._log_tk_exception
         self.root.title(APP_TITLE)
         self.root.configure(bg=C_BG)
         # ouverture centrée sur l'écran
@@ -983,6 +1234,8 @@ class App:
         self.watch_foreground()
         self.sync_active_window()
         self.wheel_init()
+        if not PIL_OK:
+            self.root.after(2500, self.check_pillow_at_startup)
 
         # vérification des mises à jour GitHub (2 s après le démarrage,
         # en arrière-plan, silencieuse si pas d'internet)
@@ -1601,11 +1854,14 @@ class App:
             "Kali va redémarrer pour l'appliquer.")
         self.restart_app()
 
-    def restart_app(self):
+    def restart_app(self, exe=None):
+        """Relance Kali. Si `exe` est fourni, c'est CET exemplaire qui est
+        lancé à la place de celui-ci (ex. un Kali.exe qui embarque Pillow)."""
+        log_line("redémarrage demandé" + (f" vers {exe}" if exe else ""))
         self.save_config()
         # retire l'icône de la zone de notification
         try:
-            self.tray.hide()
+            self.tray.remove_now()
         except Exception:
             pass
         # libère le verrou d'instance unique pour la nouvelle instance
@@ -1614,7 +1870,8 @@ class App:
                 kernel32.CloseHandle(MUTEX_HANDLE)
         except Exception:
             pass
-        if getattr(sys, "frozen", False):
+        if exe or getattr(sys, "frozen", False):
+            target = exe or sys.executable
             # Relance DIFFÉRÉE (~1 s) : laisse l'ancienne instance nettoyer
             # son dossier temporaire _MEI avant que la nouvelle ne démarre
             # (sinon Windows affiche "Failed to remove temporary directory").
@@ -1622,17 +1879,46 @@ class App:
             for k in list(env):
                 if k.startswith("_PYI") or k == "_MEIPASS2":
                     env.pop(k, None)
+            if exe:
+                env["KALI_NO_RELAUNCH"] = "1"   # pas de rebond en boucle
             CREATE_NO_WINDOW = 0x08000000
             # /d évite le souci de titre "" interprété comme chemin réseau ;
             # timeout laisse l'ancienne instance nettoyer son dossier _MEI
             subprocess.Popen(
                 f'cmd /c timeout /t 1 /nobreak >nul & '
-                f'start "Kali" /d "{os.path.dirname(sys.executable)}" '
-                f'"{sys.executable}"',
+                f'start "Kali" /d "{os.path.dirname(target)}" '
+                f'"{target}"',
                 env=env, creationflags=CREATE_NO_WINDOW, shell=True)
         else:
             subprocess.Popen([sys.executable, sys.argv[0]])
         os._exit(0)
+
+    def check_pillow_at_startup(self):
+        """Pillow absent dans CET exemplaire : on le dit clairement, et on
+        propose de basculer vers un autre Kali.exe qui l'embarque."""
+        if PIL_OK:
+            return
+        try:
+            if (getattr(sys, "frozen", False)
+                    and not os.environ.get("KALI_NO_RELAUNCH")):
+                good = [p for p in find_other_kali_exes() if exe_has_pillow(p)]
+                if good and messagebox.askyesno(
+                        APP_TITLE,
+                        "Cet exemplaire de Kali n'embarque pas le rendu "
+                        "d'images (icônes de classe, roue) :\n"
+                        f"{sys.executable}\n\n"
+                        "Une autre installation, complète, existe :\n"
+                        f"{good[0]}\n\n"
+                        "Relancer Kali avec celle-ci maintenant ?"):
+                    self.restart_app(good[0])
+                    return
+        except Exception:
+            pass
+        self.notify_safe(
+            APP_TITLE,
+            "Rendu d'images indisponible dans cet exemplaire de Kali : "
+            "icônes de classe et roue désactivées. "
+            "⚙ > Diagnostic pour le détail.")
 
     # ---------------- menu options ----------------
     def _submenu(self, parent):
@@ -1713,6 +1999,7 @@ class App:
         # entrées directes
         m.add_separator()
         m.add_command(label="Diagnostic", command=self.show_diag)
+        m.add_command(label="Ouvrir le journal d'erreurs", command=self.open_log)
         self.opt_menu = m
 
     def show_options(self, event):
@@ -1748,16 +2035,53 @@ class App:
             pass
 
     def show_diag(self):
-        from tkinter import messagebox
-        messagebox.showinfo(
-            APP_TITLE,
-            f"Version : {APP_VERSION}\n"
-            f"Rendu images (Pillow) : "
-            f"{'actif' if PIL_OK else 'INDISPONIBLE'}\n\n"
-            + ("" if PIL_OK else
-               "Pillow n'est pas embarqué dans cet exe : les icônes de "
-               "classe ne peuvent pas s'afficher. Recompile avec le "
-               "COMPILER.bat à jour et réinstalle."))
+        up = int(time.time() - _START_TIME)
+        st = process_stats()
+        res = "  ·  ".join(filter(None, [
+            f"Mémoire : {st['mem']:.0f} Mo" if "mem" in st else "",
+            f"Handles : {st['handles']}" if "handles" in st else "",
+            f"Objets GDI : {st['gdi']}" if "gdi" in st else "",
+            f"Objets USER : {st['user']}" if "user" in st else "",
+            f"Threads : {threading.active_count()}"]))
+        frozen = getattr(sys, "frozen", False)
+        txt = (f"Version : {APP_VERSION}\n"
+               f"Programme : {sys.executable}\n"
+               f"Ouvert depuis : {up // 3600} h {up % 3600 // 60:02d} min\n"
+               "Rendu images (Pillow) : "
+               + ("actif" if PIL_OK
+                  else f"INDISPONIBLE\n   cause : {PIL_ERROR}") + "\n")
+        if not PIL_OK:
+            if frozen:
+                others = find_other_kali_exes()
+                if others:
+                    txt += "\nAutres Kali.exe trouvés :\n" + "\n".join(
+                        ("  ✔ complet : " if exe_has_pillow(p)
+                         else "  ✘ sans Pillow : ") + p for p in others) + "\n"
+                txt += ("\nCet exemplaire de Kali n'embarque pas Pillow "
+                        "(ancienne compilation). Lance l'exemplaire installé, "
+                        "puis supprime les anciens Kali.exe ainsi que les "
+                        "raccourcis ou entrées de démarrage qui pointent "
+                        "vers celui-ci.\n")
+            else:
+                txt += ("\nPillow n'est pas installé pour ce Python : "
+                        "pip install pillow\n")
+        txt += (f"\nRessources de Kali :\n{res}\n"
+                "Si ces chiffres montent sans cesse au fil des heures sans "
+                "jamais redescendre, c'est une fuite : note-les.\n"
+                f"Journal : {log_path()}")
+        messagebox.showinfo(APP_TITLE, txt)
+
+    def open_log(self):
+        try:
+            open(log_path(), "a").close()
+            os.startfile(log_path())
+        except Exception:
+            pass
+
+    def _log_tk_exception(self, et, ev, tb):
+        if traceback is not None:
+            log_line("Exception dans un callback Tk :\n"
+                     + "".join(traceback.format_exception(et, ev, tb)))
 
     def notify_safe(self, title, message):
         """Notification qui respecte le mode 'icône exclusive' : si Kali
@@ -2548,18 +2872,27 @@ class App:
         self.root.after(3000, self.tick)
 
     def watch_foreground(self):
-        """Kali réduit : la mini-barre reste TOUJOURS visible au premier plan.
-        On la maintient affichée et au-dessus (certains plein-écran exclusifs
-        peuvent la masquer un instant ; on la ré-épingle en continu)."""
+        """Kali réduit : la mini-barre reste visible au premier plan.
+
+        On ne la ré-épingle QUE si nécessaire (statut « au-dessus » perdu, ou
+        changement de fenêtre active). Forcer un SetWindowPos toutes les
+        500 ms créait une « guerre d'ordre d'affichage » avec les autres
+        surcouches (Discord, Steam, GeForce...) et des scintillements sur
+        certains jeux plein écran."""
         try:
             if self.minimized and self.cfg.get("minibar", True):
                 self.show_minibar()
                 if self.mb is not None:
-                    try:
-                        self.mb.attributes("-topmost", True)
-                        self.mb.lift()
-                    except Exception:
-                        pass
+                    fg = GetForegroundWindow()
+                    wid = int(self.mb.winfo_id())
+                    hwnd = GetAncestor(wid, 2) or wid
+                    get_style = getattr(user32, "GetWindowLongPtrW",
+                                        user32.GetWindowLongW)
+                    lost = not (get_style(hwnd, -20) & 0x8)   # WS_EX_TOPMOST
+                    if lost or fg != getattr(self, "_mb_last_fg", None):
+                        self._mb_last_fg = fg
+                        _SetWindowPos(hwnd, wt.HWND(-1), 0, 0, 0, 0,
+                                      0x2 | 0x1 | 0x10)  # NOMOVE|NOSIZE|NOACTIVATE
         except Exception:
             pass
         self.root.after(500, self.watch_foreground)
@@ -2581,7 +2914,7 @@ class App:
 
     def on_close(self):
         try:
-            self.tray.hide()
+            self.tray.remove_now()
         except Exception:
             pass
         self.save_config()
@@ -2614,4 +2947,6 @@ if __name__ == "__main__":
             "notification (icônes cachées, à côté de l'horloge).")
         _r.destroy()
     else:
+        setup_crash_log()
         App().run()
+        log_line("arrêt propre")
