@@ -19,6 +19,7 @@ import ctypes.wintypes as wt
 import json
 import math
 import os
+import random
 import re
 import subprocess
 import sys
@@ -118,7 +119,7 @@ VK_CODES = {
 }
 
 APP_TITLE = "Kali"
-APP_VERSION = "5.1"
+APP_VERSION = "5.2"
 
 # Style par classe : (glyphe d'arme stylisé, couleur) — dessins génériques,
 # aucune ressource Ankama. Détecté depuis le titre "Nom - Classe - ...".
@@ -171,6 +172,10 @@ try:
 except Exception as _pil_exc:
     PIL_OK = False
     PIL_ERROR = f"{type(_pil_exc).__name__}: {_pil_exc}"
+try:
+    from PIL import ImageFont
+except Exception:
+    ImageFont = None
 
 
 class BITMAPINFOHEADER(ctypes.Structure):
@@ -281,110 +286,6 @@ def window_icon_pil(hwnd, size):
         return img.resize((size, size), Image.LANCZOS)
     except Exception:
         return None
-
-
-_TOKEN_CACHE = {}
-_LOCK_CACHE = {}
-
-
-def make_lock_icon(size, locked, color):
-    """Dessine un petit cadenas net (Pillow), ouvert ou fermé.
-    Retourne un ImageTk.PhotoImage, ou None si Pillow absent."""
-    if not PIL_OK:
-        return None
-    key = (size, locked, color)
-    if key in _LOCK_CACHE:
-        return _LOCK_CACHE[key]
-    SS = 4
-    N = size * SS
-    im = Image.new("RGBA", (N, N), (0, 0, 0, 0))
-    d = ImageDraw.Draw(im)
-    col = tuple(int(color[i:i+2], 16) for i in (1, 3, 5)) + (255,)
-    # corps du cadenas (rectangle arrondi dans la moitié basse)
-    bw, bh = N * 0.60, N * 0.42
-    bx = (N - bw) / 2
-    by = N * 0.48
-    d.rounded_rectangle((bx, by, bx + bw, by + bh),
-                        radius=N * 0.09, fill=col)
-    # anse (arc en U inversé au-dessus du corps)
-    aw = bw * 0.62
-    ax = (N - aw) / 2
-    ay_top = N * 0.18
-    lw = max(2, int(N * 0.10))
-    if locked:
-        # anse fermée : U symétrique qui rejoint le corps
-        d.arc((ax, ay_top, ax + aw, by + lw), start=180, end=360,
-              fill=col, width=lw)
-        d.line((ax, (ay_top + by) / 2, ax, by), fill=col, width=lw)
-        d.line((ax + aw, (ay_top + by) / 2, ax + aw, by), fill=col, width=lw)
-    else:
-        # anse ouverte : soulevée et un seul montant redescend
-        ax2 = ax + aw * 0.28
-        d.arc((ax2, ay_top - N * 0.06, ax2 + aw, by - N * 0.04),
-              start=180, end=360, fill=col, width=lw)
-        d.line((ax2, (ay_top + by) / 2 - N * 0.05, ax2, by - N * 0.06),
-               fill=col, width=lw)
-    # trou de serrure
-    kr = N * 0.055
-    kx, ky = N / 2, by + bh * 0.44
-    d.ellipse((kx - kr, ky - kr, kx + kr, ky + kr), fill=(22, 22, 30, 255))
-    im = im.resize((size, size), Image.LANCZOS)
-    tk_img = ImageTk.PhotoImage(im)
-    _LOCK_CACHE[key] = tk_img
-    return tk_img
-
-
-def make_token_pil(hwnd, R, ring_hex, active, accent_hex="#4cc2ff",
-                   bg_hex="#16161e"):
-    """Jeton complet Pillow (halo + anneau de classe + icône), tout
-    anti-aliasé. Retourne un ImageTk.PhotoImage prêt à afficher, ou None.
-    Mis en cache par (hwnd, R, classe, actif) : recalcul uniquement si l'un
-    de ces paramètres change -> changement de perso actif quasi instantané."""
-    if not PIL_OK:
-        return None
-    key = (hwnd, R, ring_hex, active)
-    if key in _TOKEN_CACHE:
-        return _TOKEN_CACHE[key]
-    halo = 9
-    S = 2 * (R + halo) + 2
-    SS = 4
-    N = S * SS
-    im = Image.new("RGBA", (N, N), (0, 0, 0, 0))
-    d = ImageDraw.Draw(im)
-    c = N / 2
-    ring = tuple(int(ring_hex[i:i+2], 16) for i in (1, 3, 5)) + (255,)
-    accent = tuple(int(accent_hex[i:i+2], 16) for i in (1, 3, 5))
-    bg = tuple(int(bg_hex[i:i+2], 16) for i in (1, 3, 5)) + (255,)
-
-    def circle(radius, fill=None, outline=None, width=1):
-        d.ellipse((c - radius, c - radius, c + radius, c + radius),
-                  fill=fill, outline=outline, width=width)
-
-    if active:
-        # halo bleu marqué : anneaux d'alpha décroissant + liseré vif
-        for k in range(halo, 0, -1):
-            a = int(200 * (k / halo))
-            circle((R + k) * SS, outline=accent + (a,), width=2 * SS)
-        circle((R + 2) * SS, outline=accent + (255,), width=SS)
-    ring_w = (3 if active else 2) * SS
-    circle(R * SS, fill=bg)                      # disque de fond
-    circle(R * SS, outline=ring, width=ring_w)   # anneau de classe
-
-    # icône au centre
-    ico = window_icon_pil(hwnd, int((R - 3) * 2) * SS // SS)
-    if ico is not None:
-        ico = ico.resize(((R - 2) * 2 * SS, (R - 2) * 2 * SS), Image.LANCZOS)
-        im.alpha_composite(ico, (int(c - ico.width / 2),
-                                 int(c - ico.height / 2)))
-
-    im = im.resize((S, S), Image.LANCZOS)
-    tkimg = ImageTk.PhotoImage(im)
-    # IMPORTANT : on ne met en cache QUE si l'icône a été récupérée.
-    # Au lancement, Dofus met parfois un instant à publier son icône ;
-    # sans cette garde, un jeton vide restait figé toute la session.
-    if ico is not None:
-        _TOKEN_CACHE[key] = tkimg
-    return tkimg
 
 
 # ==== ROUE DES PERSONNAGES : DEBUT (rendu Pillow + utilitaires) ====
@@ -579,6 +480,18 @@ def build_wheel_overlay(n, i):
     return ov.resize((size, size), Image.LANCZOS)
 
 
+def to_colorkey(im):
+    """Image RGBA -> RGB prête pour une fenêtre à couleur clé : chaque pixel
+    est soit opaque (couleur pure), soit EXACTEMENT la couleur clé (donc
+    transparent). Évite les pixels de bord semi-transparents, que Windows
+    laisserait afficher en petits points sombres autour des formes."""
+    r, g, b, a = im.split()
+    mask = a.point(lambda v: 255 if v >= 128 else 0)
+    out = Image.new("RGB", im.size, WHEEL_KEY_RGB)
+    out.paste(Image.merge("RGB", (r, g, b)), mask=mask)
+    return out
+
+
 def compose_wheel_frame(base, overlay):
     """Image finale : fond + (surbrillance) + jetons, prête pour Windows.
 
@@ -591,12 +504,489 @@ def compose_wheel_frame(base, overlay):
     if overlay is not None:
         im.alpha_composite(overlay)
     im.alpha_composite(base["tokens"])
-    r, g, b, a = im.split()
-    mask = a.point(lambda v: 255 if v >= 128 else 0)
-    out = Image.new("RGB", im.size, WHEEL_KEY_RGB)
-    out.paste(Image.merge("RGB", (r, g, b)), mask=mask)
-    return out
+    return to_colorkey(im)
 # ==== ROUE DES PERSONNAGES : FIN ====
+
+
+# ==== MINI-BARRE : DEBUT (styles, géométrie, rendu Pillow) ====
+# ---------------------------------------------------------------------------
+# Mini-barre : 3 styles (classique, capsule, dock à zoom) x 2 orientations.
+# Tout est calculé ici de façon « pure » (aucune dépendance à Tk/Windows) :
+# une fonction de mise en page + une fonction de rendu supersamplé x3, ce qui
+# permet d'utiliser EXACTEMENT le même code pour la vraie barre et pour
+# l'aperçu de la boîte de dialogue de réglage.
+# ---------------------------------------------------------------------------
+MB_STYLES = (("classic", "Classique"), ("capsule", "Capsule"),
+             ("dock", "Dock à zoom"))
+MB_SS = 3
+MB_DARK = (22, 22, 30)
+MB_PANEL = (20, 20, 26)
+MB_BORDER = (62, 62, 76)
+MB_ACCENT = (76, 194, 255)
+MB_CARD_ACT = (15, 58, 95)
+MB_TIP_M = 40        # marge réservée à l'info-bulle (barre horizontale)
+MB_TIP_W = 240       # idem (barre verticale)
+MB_TIP_X = 96        # marge latérale (barre horizontale) : le pseudo d'un
+                     # jeton situé en bout de barre dépasse de chaque côté
+MB_DEMO = (("Skiouw-Iop", "#e07a3c"), ("Skiouw-Panda", "#d4b98a"),
+           ("Skiouw-Elio", "#7ab8ff"), ("Skiouw-Eni", "#f08fc0"),
+           ("Skiouw-Forge", "#8a9ab8"), ("Skiouw-Sadi", "#4faf6e"),
+           ("Skiouw-Zobal", "#b08968"), ("Skiouw-Enu", "#e6c84f"))
+
+_MB_FONTS = {}
+
+
+def mb_font(px):
+    """Police des textes de la barre (None si Pillow n'a pas ImageFont)."""
+    if ImageFont is None:
+        return None
+    f = _MB_FONTS.get(px)
+    if f is None:
+        for name in ("segoeuib.ttf", "arialbd.ttf", "DejaVuSans-Bold.ttf"):
+            try:
+                f = ImageFont.truetype(name, px)
+                break
+            except Exception:
+                f = None
+        if f is None:
+            try:
+                f = ImageFont.load_default()
+            except Exception:
+                return None
+        _MB_FONTS[px] = f
+    return f
+
+
+def _mb_rgb(h):
+    return tuple(int(h[i:i + 2], 16) for i in (1, 3, 5))
+
+
+def _mb_mix(a, b, t):
+    return tuple(int(x + (y - x) * t) for x, y in zip(a, b))
+
+
+def _mb_over_dark(c, a):
+    """Teinte obtenue par un pixel translucide posé sur la couleur clé
+    (presque noire) : la fenêtre n'a pas de vraie transparence partielle."""
+    return tuple(int(v * a / 255.0 + 2 * (1 - a / 255.0)) for v in c)
+
+
+class _MBPaint:
+    """Dessin supersamplé : coordonnées logiques (1x), rendu x3 puis réduit."""
+
+    def __init__(self, w, h):
+        self.w, self.h = int(math.ceil(w)), int(math.ceil(h))
+        self.im = Image.new("RGBA", (self.w * MB_SS, self.h * MB_SS),
+                            (0, 0, 0, 0))
+        self.d = ImageDraw.Draw(self.im)
+
+    @staticmethod
+    def _c(c):
+        return None if c is None else tuple(c) + (255,)
+
+    @staticmethod
+    def _w(v):
+        return max(1, int(round(v * MB_SS)))
+
+    def circle(self, cx, cy, r, fill=None, outline=None, width=1):
+        s = MB_SS
+        self.d.ellipse((cx * s - r * s, cy * s - r * s, cx * s + r * s,
+                        cy * s + r * s), fill=self._c(fill),
+                       outline=self._c(outline), width=self._w(width))
+
+    def rrect(self, x0, y0, x1, y1, rad, fill=None, outline=None, width=1):
+        s = MB_SS
+        self.d.rounded_rectangle((x0 * s, y0 * s, x1 * s, y1 * s),
+                                 radius=rad * s, fill=self._c(fill),
+                                 outline=self._c(outline),
+                                 width=self._w(width))
+
+    def line(self, x0, y0, x1, y1, col, width=1):
+        s = MB_SS
+        self.d.line((x0 * s, y0 * s, x1 * s, y1 * s), fill=self._c(col),
+                    width=self._w(width))
+
+    def arc(self, x0, y0, x1, y1, a0, a1, col, width=1):
+        s = MB_SS
+        self.d.arc((x0 * s, y0 * s, x1 * s, y1 * s), a0, a1,
+                   fill=self._c(col), width=self._w(width))
+
+    def lock(self, cx, cy, size, col, locked):
+        """Petit cadenas (fermé / ouvert), dessiné sans emoji."""
+        s = size
+        bw, bh = s * .62, s * .44
+        bx0, by0 = cx - bw / 2, cy - s * .02
+        self.rrect(bx0, by0, bx0 + bw, by0 + bh, s * .08, fill=col)
+        aw, lw = bw * .62, max(1.2, s * .11)
+        ox = 0 if locked else aw * .3
+        self.arc(cx - aw / 2 + ox, by0 - s * .34, cx + aw / 2 + ox,
+                 by0 + s * .10, 180, 360, col, lw)
+        self.line(cx - aw / 2 + ox, by0 - s * .12, cx - aw / 2 + ox,
+                  by0 + s * .02, col, lw)
+        if locked:
+            self.line(cx + aw / 2, by0 - s * .12, cx + aw / 2,
+                      by0 + s * .02, col, lw)
+
+    def done(self):
+        return self.im.resize((self.w, self.h), Image.LANCZOS)
+
+
+def _mb_xy(orient, a, c):
+    """(axe principal, axe transversal) -> (x, y)."""
+    return (a, c) if orient == "h" else (c, a)
+
+
+def _mb_rect(orient, a0, c0, a1, c1):
+    return (a0, c0, a1, c1) if orient == "h" else (c0, a0, c1, a1)
+
+
+def _mb_ring(col, active):
+    return MB_ACCENT if active else col
+
+
+def _mb_classic(n, orient, active, locked, entries):
+    """Jetons ronds flottants, halo bleu sur l'actif, badges numérotés."""
+    R, GAP, HALO, LR = 21, 14, 10, 11
+    cell = 2 * R + GAP
+    cross = 2 * (R + HALO) + 4
+    L = HALO + n * cell - GAP + 14 + 2 * LR + HALO
+    W, H = (L, cross) if orient == "h" else (cross, L)
+    p, cc = _MBPaint(W, H), cross / 2.0
+    icons, texts, cells, tips = [], [], [], []
+    for i, (name, col, hw) in enumerate(entries):
+        a = HALO + R + i * cell
+        x, y = _mb_xy(orient, a, cc)
+        act = i == active
+        if act:
+            for k in range(1, 10):
+                p.circle(x, y, R + k, outline=_mb_over_dark(
+                    MB_ACCENT, int(200 * k / 9.0)), width=2)
+            p.circle(x, y, R + 2, outline=MB_ACCENT, width=1)
+        p.circle(x, y, R, fill=MB_DARK, outline=_mb_rgb(col),
+                 width=3 if act else 2)
+        icons.append((x, y, R - 3, i, 0.0))
+        bx, by = x + R - 5, y + R - 5
+        p.circle(bx, by, 7, fill=MB_ACCENT if act else (43, 43, 43),
+                 outline=MB_DARK, width=1)
+        texts.append((bx, by, str(i + 1), 9,
+                      MB_DARK if act else (154, 154, 154)))
+        cells.append(_mb_rect(orient, a - cell / 2.0, 0, a + cell / 2.0, cross))
+        tips.append((x, y, R + (HALO if act else 2)))
+    al = HALO + n * cell - GAP + 14 + LR
+    lx, ly = _mb_xy(orient, al, cc)
+    p.circle(lx, ly, LR, fill=MB_CARD_ACT if locked else MB_DARK,
+             outline=MB_ACCENT if locked else (58, 58, 58), width=1)
+    p.lock(lx, ly, LR * 1.15, MB_ACCENT if locked else (154, 154, 154), locked)
+    lock = (lx - LR - 2, ly - LR - 2, lx + LR + 2, ly + LR + 2)
+    return p, icons, texts, {"size": (W, H), "cells": cells, "lock": lock,
+                             "bar": None, "tips": tips}
+
+
+def _mb_capsule(n, orient, active, locked, entries):
+    """Pilule sombre contenant les jetons ; l'actif est agrandi et cerclé."""
+    R, GAP, PAD, MG = 19, 8, 12, 4
+    cell = 2 * R + GAP
+    chh = 2 * R + 16
+    xt = PAD + n * cell - GAP
+    sep = xt + 10
+    al = sep + 6 + 9
+    L = al + 9 + 12
+    W, H = ((L + 2 * MG, chh + 2 * MG) if orient == "h"
+            else (chh + 2 * MG, L + 2 * MG))
+    p, cc = _MBPaint(W, H), MG + chh / 2.0
+    p.rrect(*_mb_rect(orient, MG, MG, MG + L, MG + chh), chh / 2.0,
+            fill=MB_PANEL, outline=MB_BORDER, width=1)
+    icons, texts, cells, tips = [], [], [], []
+    for i, (name, col, hw) in enumerate(entries):
+        a = MG + PAD + R + i * cell
+        x, y = _mb_xy(orient, a, cc)
+        act = i == active
+        r = R + (2 if act and orient == "h" else 0)
+        if act and orient == "h":
+            p.circle(x, y, r + 4, fill=_mb_over_dark(MB_ACCENT, 70))
+            p.circle(x, y, r + 2, outline=MB_ACCENT, width=2)
+        elif act:                                   # vertical : pastille + trait
+            p.rrect(MG + 4, y - R - 4, MG + chh - 4, y + R + 4, 17,
+                    fill=MB_CARD_ACT)
+            p.rrect(MG + .5, y - 12, MG + 4, y + 12, 1.6, fill=MB_ACCENT)
+        p.circle(x, y, r, fill=MB_DARK,
+                 outline=MB_ACCENT if act else _mb_mix(_mb_rgb(col), MB_DARK, .35),
+                 width=2.5 if act else 2)
+        icons.append((x, y, r - 3, i, 0.0 if act else 0.28))
+        cells.append(_mb_rect(orient, a - cell / 2.0, MG, a + cell / 2.0,
+                              MG + chh))
+        tips.append((x, y, r + (6 if act else 3)))
+    sx, sy = _mb_xy(orient, MG + sep, cc)
+    if orient == "h":
+        p.line(sx, sy - 11, sx, sy + 11, MB_BORDER, 1)
+    else:
+        p.line(sx - 11, sy, sx + 11, sy, MB_BORDER, 1)
+    lx, ly = _mb_xy(orient, MG + al, cc)
+    p.lock(lx, ly, 10.4, MB_ACCENT if locked else (154, 154, 154), locked)
+    lock = (lx - 12, ly - 12, lx + 12, ly + 12)
+    bar = _mb_rect(orient, MG, MG, MG + L, MG + chh)
+    return p, icons, texts, {"size": (W, H), "cells": cells, "lock": lock,
+                             "bar": bar, "tips": tips}
+
+
+def _mb_dock(n, orient, active, locked, entries):
+    """Façon dock : l'actif est grand, ses voisins moyens, les autres petits."""
+    G, PAD, MG, BAR, OVER, EDGE = 6, 14, 4, 46, 22, 7
+
+    def radii(act):
+        return [{0: 27, 1: 21, 2: 18}.get(abs(i - act) if act >= 0 else 9, 15)
+                for i in range(n)]
+    rs = radii(active)
+    # longueur FIXE (indépendante de l'actif) : la fenêtre ne bouge pas
+    widest = max([sum(2 * r for r in radii(a)) for a in range(max(n, 1))]
+                 + [sum(2 * r for r in rs)])
+    xt = PAD + widest + max(n - 1, 0) * G
+    al = xt + 12 + 9
+    L = al + 9 + 12
+    c0 = MG + OVER if orient == "h" else MG       # bord « fixe » de la barre
+    c1 = c0 + BAR
+    W, H = ((L + 2 * MG, MG + OVER + BAR + MG) if orient == "h"
+            else (MG + BAR + OVER + MG, L + 2 * MG))
+    p = _MBPaint(W, H)
+    p.rrect(*_mb_rect(orient, MG, c0, MG + L, c1), BAR / 2.0,
+            fill=MB_PANEL, outline=MB_BORDER, width=1)
+    icons, texts, cells, tips = [], [], [], []
+    a = MG + PAD
+    act_pos = None
+    full = (H if orient == "h" else W)
+    for i, (name, col, hw) in enumerate(entries):
+        r = rs[i]
+        ai = a + r
+        a += 2 * r + G
+        c = (c1 - EDGE - r) if orient == "h" else (c0 + EDGE + r)
+        x, y = _mb_xy(orient, ai, c)
+        act = i == active
+        if act:
+            act_pos = ai
+            p.circle(x, y, r + 3, fill=_mb_over_dark(MB_ACCENT, 90))
+        p.circle(x, y, r, fill=MB_DARK, outline=_mb_ring(_mb_rgb(col), act),
+                 width=2.4 if act else 1.8)
+        icons.append((x, y, r - 2.4, i, 0.0 if act else 0.15))
+        cells.append(_mb_rect(orient, ai - r - G / 2.0, 0, ai + r + G / 2.0,
+                              full))
+        tips.append((x, y, r + (4 if act else 3)))
+    if act_pos is not None:
+        dx, dy = _mb_xy(orient, act_pos, (c1 - 3.2) if orient == "h" else (c0 + 3.2))
+        p.circle(dx, dy, 2.2, fill=MB_ACCENT)
+    lx, ly = _mb_xy(orient, MG + al, (c0 + c1) / 2.0)
+    p.lock(lx, ly, 10.4, MB_ACCENT if locked else (154, 154, 154), locked)
+    lock = (lx - 12, ly - 12, lx + 12, ly + 12)
+    bar = _mb_rect(orient, MG, c0, MG + L, c1)
+    return p, icons, texts, {"size": (W, H), "cells": cells, "lock": lock,
+                             "bar": bar, "tips": tips}
+
+
+def _mb_fallback_icon(size, col_hex):
+    """Disque teinté de la couleur de classe (icône pas encore disponible)."""
+    SS = 4
+    im = Image.new("RGBA", (size * SS, size * SS), (0, 0, 0, 0))
+    tint = tuple(int(v * 0.45) for v in _mb_rgb(col_hex)) + (255,)
+    ImageDraw.Draw(im).ellipse((0, 0, size * SS - 1, size * SS - 1), fill=tint)
+    return im.resize((size, size), Image.LANCZOS)
+
+
+def mb_build(style, orient, entries, active, locked, icon_fn, flatten=True):
+    """Image de la barre. entries = [(pseudo, couleur_hex, hwnd)].
+    icon_fn(i, entry, taille) -> image Pillow ronde ou None.
+    Retourne (image, mise en page, toutes_icônes_trouvées)."""
+    orient = "v" if orient == "v" else "h"
+    fn = {"capsule": _mb_capsule, "dock": _mb_dock}.get(style, _mb_classic)
+    p, icons, texts, lay = fn(len(entries), orient, active, locked, entries)
+    im = p.done()
+    complete = True
+    for (x, y, r, i, dim) in icons:
+        size = max(8, int(round(2 * r)))
+        ic = icon_fn(i, entries[i], size)
+        if ic is None:
+            complete = False
+            ic = _mb_fallback_icon(size, entries[i][1])
+        if dim:
+            dk = Image.new("RGBA", ic.size, MB_DARK + (255,))
+            dk.putalpha(ic.getchannel("A"))
+            ic = Image.blend(ic, dk, dim)
+        im.alpha_composite(ic, (int(round(x - size / 2.0)),
+                                int(round(y - size / 2.0))))
+    d = ImageDraw.Draw(im)
+    for (x, y, s, px, col) in texts:
+        f = mb_font(px)
+        if f is not None:
+            try:
+                d.text((x, y), s, font=f, fill=tuple(col) + (255,), anchor="mm")
+            except Exception:
+                pass
+    return (to_colorkey(im) if flatten else im), lay, complete
+
+
+def mb_hit(lay, x, y):
+    """Élément sous (x, y) [repère de l'image de la barre] :
+    ('lock', None) | ('tok', i) | ('bar', None) | None."""
+    lx0, ly0, lx1, ly1 = lay["lock"]
+    if lx0 <= x <= lx1 and ly0 <= y <= ly1:
+        return ("lock", None)
+    for i, (x0, y0, x1, y1) in enumerate(lay["cells"]):
+        if x0 <= x < x1 and y0 <= y <= y1:
+            return ("tok", i)
+    b = lay["bar"]
+    if b and b[0] <= x <= b[2] and b[1] <= y <= b[3]:
+        return ("bar", None)
+    return None
+
+
+def mb_margins(orient):
+    """Marges transparentes autour de la barre (place de l'info-bulle)."""
+    return (MB_TIP_X, MB_TIP_M) if orient == "h" else (MB_TIP_W, 8)
+
+
+def mb_tip_image(text, color_hex, side):
+    """Info-bulle (pseudo). Retourne (image RGBA, pointe) ou (None, None).
+    side : 'up' | 'down' | 'right' | 'left' = côté de la barre où elle se pose."""
+    f = mb_font(11)
+    if f is None:
+        return None, None
+    try:
+        tw = int(ImageDraw.Draw(Image.new("RGBA", (1, 1))).textlength(text, font=f))
+    except Exception:
+        return None, None
+    A, padx, bh = 5, 8, 12 + 10
+    bw = tw + 2 * padx
+    SS = 3
+    if side in ("up", "down"):
+        W, H = bw + 2, bh + A + 2
+    else:
+        W, H = bw + A + 2, bh + 2
+    bx, by = {"up": (1, 1), "down": (1, A + 1),
+              "right": (A + 1, 1), "left": (1, 1)}[side]
+    im = Image.new("RGBA", (W * SS, H * SS), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    box, acc = (30, 30, 40, 255), MB_ACCENT + (255,)
+    d.rounded_rectangle((bx * SS, by * SS, (bx + bw) * SS, (by + bh) * SS),
+                        radius=6 * SS, fill=box, outline=acc, width=SS)
+    if side == "up":
+        tri = [(W / 2 - 4, by + bh - .5), (W / 2 + 4, by + bh - .5), (W / 2, H - 1)]
+        tip = (W / 2.0, H - 1.0)
+    elif side == "down":
+        tri = [(W / 2 - 4, by + .5), (W / 2 + 4, by + .5), (W / 2, 1)]
+        tip = (W / 2.0, 1.0)
+    elif side == "right":
+        tri = [(bx + .5, H / 2 - 4), (bx + .5, H / 2 + 4), (1, H / 2)]
+        tip = (1.0, H / 2.0)
+    else:
+        tri = [(bx + bw - .5, H / 2 - 4), (bx + bw - .5, H / 2 + 4), (W - 1, H / 2)]
+        tip = (W - 1.0, H / 2.0)
+    d.polygon([(x * SS, y * SS) for x, y in tri], fill=box, outline=acc)
+    im = im.resize((W, H), Image.LANCZOS)
+    try:
+        ImageDraw.Draw(im).text((bx + bw / 2.0, by + bh / 2.0), text, font=f,
+                                fill=(255, 255, 255, 255), anchor="mm")
+    except Exception:
+        pass
+    return im, tip
+
+
+def mb_tip_place(lay, i, side, tip):
+    """Coin haut-gauche de l'info-bulle (repère de l'image de la barre)."""
+    x, y, rr = lay["tips"][i]
+    tx, ty = {"up": (x, y - rr - 2), "down": (x, y + rr + 2),
+              "right": (x + rr + 2, y), "left": (x - rr - 2, y)}[side]
+    return int(round(tx - tip[0])), int(round(ty - tip[1]))
+
+
+def _mb_fake_icon(px, col_hex):
+    """Portrait de substitution pour l'aperçu quand aucun Dofus n'est ouvert."""
+    base = _mb_rgb(col_hex)
+    bgc = tuple(int(v * .36) for v in base)
+    hi = tuple(min(255, int(v * .45 + 140)) for v in base)
+    im = Image.new("RGBA", (px, px), bgc + (255,))
+    d = ImageDraw.Draw(im)
+    for k in range(7):
+        r = px * (.70 - k * .075)
+        d.ellipse((px / 2 - r, px * .58 - r, px / 2 + r, px * .58 + r),
+                  fill=_mb_mix(bgc, base, k / 7.0 * .6) + (255,))
+    d.ellipse((px * .14, px * .58, px * .86, px * 1.22), fill=base + (255,))
+    d.ellipse((px * .31, px * .18, px * .69, px * .60), fill=hi + (255,))
+    for ex in (.42, .58):
+        d.ellipse((px * ex - px * .035, px * .38, px * ex + px * .035,
+                   px * .45), fill=bgc + (255,))
+    m = Image.new("L", (px, px), 0)
+    ImageDraw.Draw(m).ellipse((0, 0, px - 1, px - 1), fill=255)
+    im.putalpha(m)
+    return im
+
+
+_MB_BACKDROPS = {}
+
+
+def mb_backdrop(w, h):
+    """Fond « décor de jeu » pour l'aperçu (sans ImageFilter)."""
+    k = (w, h)
+    if k not in _MB_BACKDROPS:
+        base = Image.new("RGB", (w, h))
+        d = ImageDraw.Draw(base)
+        for y in range(h):
+            d.line((0, y, w, y), fill=_mb_mix((82, 98, 58), (44, 60, 40),
+                                              y / max(1.0, h - 1.0)))
+        sw, sh = max(8, w // 14), max(8, h // 14)
+        small = Image.new("RGB", (sw, sh), (60, 80, 50))
+        sd, rnd = ImageDraw.Draw(small), random.Random(7)
+        for _ in range(18):
+            x, y, r = rnd.randint(0, sw), rnd.randint(0, sh), rnd.randint(2, 6)
+            sd.ellipse((x - r, y - r * .6, x + r, y + r * .6), fill=rnd.choice(
+                [(96, 118, 64), (62, 84, 46), (110, 96, 62), (40, 56, 38)]))
+        _MB_BACKDROPS[k] = Image.blend(base, small.resize((w, h), Image.BICUBIC), .55)
+    return _MB_BACKDROPS[k].copy()
+
+
+def mb_preview_image(style, orient, entries, active, locked, icon_fn, box):
+    """Aperçu fidèle de la barre (même rendu que la vraie) sur un décor de
+    jeu, centré et réduit au besoin pour tenir dans box=(largeur, hauteur)."""
+    orient = "v" if orient == "v" else "h"
+    im, lay, _ = mb_build(style, orient, entries, active, locked, icon_fn,
+                          flatten=False)
+    bw, bh = lay["size"]
+    mx, my = mb_margins(orient)
+    if orient == "v":
+        mx = 8 if style == "classic" else mx          # place pour l'info-bulle
+    scene = Image.new("RGBA", (bw + 2 * mx, bh + 2 * my), (0, 0, 0, 0))
+    scene.alpha_composite(im, (mx, my))
+    if style != "classic" and 0 <= active < len(entries):
+        side = "up" if orient == "h" else "right"
+        tip, pt = mb_tip_image("%d · %s" % (active + 1, entries[active][0]),
+                               entries[active][1], side)
+        if tip is not None:
+            tx, ty = mb_tip_place(lay, active, side, pt)
+            scene.alpha_composite(tip, (mx + tx, my + ty))
+    k = min(1.0, (box[0] - 16) / float(scene.width),
+            (box[1] - 16) / float(scene.height))
+    if k < 1.0:
+        scene = scene.resize((max(1, int(scene.width * k)),
+                              max(1, int(scene.height * k))), Image.LANCZOS)
+    out = mb_backdrop(box[0], box[1]).convert("RGBA")
+    out.alpha_composite(scene, ((box[0] - scene.width) // 2,
+                                (box[1] - scene.height) // 2))
+    return out.convert("RGB")
+# ==== MINI-BARRE : FIN ====
+
+
+_MB_ICON_CACHE = {}    # (hwnd, taille) -> icône Pillow ronde
+
+
+def mb_window_icon(i, entry, size):
+    """Icône de la fenêtre Dofus (mise en cache ; None si pas encore prête)."""
+    hw = entry[2]
+    if not hw:
+        return None
+    k = (hw, size)
+    ic = _MB_ICON_CACHE.get(k)
+    if ic is None:
+        ic = window_icon_pil(hw, size)
+        if ic is not None:
+            _MB_ICON_CACHE[k] = ic
+    return ic
 
 
 def normalize_class(txt):
@@ -1207,6 +1597,16 @@ class App:
         self.minimized = False
         self.mb = None             # mini-barre flottante (mode réduit)
         self.mb_visible = False
+        self._mb_lay = None        # mise en page de la barre affichée
+        self._mb_m = None          # marges autour de la barre dans la fenêtre
+        self._mb_entries = []
+        self._mb_frames = {}       # images déjà rendues
+        self._mb_hover = -1        # jeton survolé
+        self._mb_auto_tip = -1     # info-bulle affichée au changement de perso
+        self._mb_tip_job = None
+        self._mb_tip_cache = {}
+        self._mb_prev_active = None
+        self._mb_dlg = None
         self.break_notified = 0    # heures de jeu déjà notifiées
         self.cfg = self.load_config()
 
@@ -1283,7 +1683,8 @@ class App:
                "notify_session": True, "direct_mod": "Alt", "auto_update": True, "break_reminder": True,
                "minibar": True, "auto_focus_first": True,
                "minibar_locked": False, "minibar_pos": None,
-               "wheel_enabled": True, "wheel_vk": 0x05}
+               "wheel_enabled": True, "wheel_vk": 0x05,
+               "minibar_style": "classic", "minibar_orient": "h"}
         try:
             with open(config_path(), "r", encoding="utf-8") as f:
                 cfg.update(json.load(f))
@@ -1446,12 +1847,35 @@ class App:
             pass
 
     # ---------------- mini-barre flottante (mode réduit) ----------------
-    # Design "portraits flottants" : des jetons circulaires posés directement
-    # sur l'écran (fond transparent, pas de capsule), anneau coloré par
-    # classe, double anneau lumineux sur le perso actif.
-    MB_R = 21        # rayon des jetons
-    MB_GAP = 14      # espace entre jetons
-    MB_H = 66        # hauteur du canevas (marge pour le halo)
+    # 3 styles (classique / capsule / dock à zoom) x 2 orientations, choisis
+    # dans ⚙ > Mini-barre > Style et orientation… (avec aperçu en direct).
+    # La barre est UNE seule image Pillow (rendu : mb_build) ; les clics sont
+    # résolus par la géométrie (mb_hit), ce qui permet n'importe quelle forme.
+    def _mb_style_orient(self):
+        style = self.cfg.get("minibar_style", "classic")
+        if style not in dict(MB_STYLES):
+            style = "classic"
+        return style, ("v" if self.cfg.get("minibar_orient", "h") == "v" else "h")
+
+    def _virtual_screen(self):
+        """Bureau complet (tous les écrans) : (x, y, largeur, hauteur)."""
+        try:
+            return (user32.GetSystemMetrics(76), user32.GetSystemMetrics(77),
+                    user32.GetSystemMetrics(78), user32.GetSystemMetrics(79))
+        except Exception:
+            return (0, 0, self.root.winfo_screenwidth(),
+                    self.root.winfo_screenheight())
+
+    def _mb_clamp(self, bx, by):
+        """Garde la barre entièrement à l'écran."""
+        bw, bh = self._mb_lay["size"]
+        vx, vy, vw, vh = self._virtual_screen()
+        return (int(max(vx, min(bx, vx + vw - bw))),
+                int(max(vy, min(by, vy + vh - bh))))
+
+    def _mb_move_bar(self, bx, by):
+        mx, my = self._mb_m
+        self.mb.geometry(f"+{bx - mx}+{by - my}")
 
     def _ensure_minibar(self):
         """Crée la fenêtre mini-barre une seule fois (réutilisée ensuite)."""
@@ -1467,46 +1891,47 @@ class App:
             mb.attributes("-transparentcolor", self._mb_trans)
         except Exception:
             self._mb_trans = C_BG
-        self.mb_canvas = tk.Canvas(mb, bg=self._mb_trans, bd=0,
-                                   highlightthickness=0, height=self.MB_H)
-        self.mb_canvas.pack()
-        self.mb = mb
+        cv = tk.Canvas(mb, bg=self._mb_trans, bd=0, highlightthickness=0)
+        cv.pack()
+        self._mb_img_item = cv.create_image(0, 0, anchor="nw", image="")
+        self._mb_tip_item = cv.create_image(0, 0, anchor="nw", image="",
+                                            state="hidden")
+        cv.bind("<ButtonPress-1>", self._mb_on_press)
+        cv.bind("<B1-Motion>", self.mb_drag)
+        cv.bind("<ButtonRelease-1>", self.mb_release)
+        cv.bind("<Motion>", self._mb_on_motion)
+        cv.bind("<Leave>", self._mb_on_leave)
+        cv.bind("<ButtonPress-3>", self._mb_context_menu)
+        self.mb, self.mb_canvas = mb, cv
         self.mb_visible = False
+        self._mb_prev_active = None
+        self._mb_m = None
         mb.withdraw()
         self.fill_minibar()
         self._place_minibar()
 
     def _default_minibar_pos(self):
-        """Coin bas-droit, toujours dans l'écran."""
-        self.mb.update_idletasks()
-        w = self.mb_canvas.winfo_reqwidth()
-        sw = self.mb.winfo_screenwidth()
-        sh = self.mb.winfo_screenheight()
-        return sw - w - 20, sh - self.MB_H - 70
+        """Origine par défaut de la barre : coin bas-droit de l'écran."""
+        bw, bh = self._mb_lay["size"]
+        return (self.root.winfo_screenwidth() - bw - 20,
+                self.root.winfo_screenheight() - bh - 70)
 
     def _place_minibar(self):
-        if self.mb is None:
+        if self.mb is None or self._mb_lay is None:
             return
-        self.mb.update_idletasks()
-        sw, sh = self.mb.winfo_screenwidth(), self.mb.winfo_screenheight()
         pos = self.cfg.get("minibar_pos")
-        # position mémorisée valide si le coin haut-gauche est à l'écran
-        # (tolérant : on garde la position choisie par l'utilisateur, on la
-        # borne juste pour qu'elle reste attrapable)
         if pos and isinstance(pos, (list, tuple)) and len(pos) == 2:
-            x = max(0, min(int(pos[0]), sw - 40))
-            y = max(0, min(int(pos[1]), sh - 20))
+            bx, by = int(pos[0]), int(pos[1])
         else:
-            x, y = self._default_minibar_pos()
-        self.mb.geometry(f"+{x}+{y}")
+            bx, by = self._default_minibar_pos()
+        self._mb_move_bar(*self._mb_clamp(bx, by))
 
     def reset_minibar_position(self):
         """Ramène la mini-barre au coin bas-droit (dépannage si perdue)."""
         self.cfg["minibar_pos"] = None
         self.save_config()
         if self.mb is not None:
-            x, y = self._default_minibar_pos()
-            self.mb.geometry(f"+{x}+{y}")
+            self._place_minibar()
             self.mb.deiconify()
             self.mb.lift()
             self.mb_visible = True
@@ -1536,6 +1961,12 @@ class App:
 
     def destroy_minibar(self):
         """Détruit réellement la mini-barre (à la restauration de Kali)."""
+        if self._mb_tip_job is not None:
+            try:
+                self.root.after_cancel(self._mb_tip_job)
+            except Exception:
+                pass
+            self._mb_tip_job = None
         if self.mb is not None:
             try:
                 self.mb.destroy()
@@ -1543,6 +1974,8 @@ class App:
                 pass
             self.mb = None
             self.mb_visible = False
+            self._mb_hover = -1
+            self._mb_auto_tip = -1
 
     def fill_minibar(self):
         if self.mb is None:
@@ -1555,112 +1988,55 @@ class App:
             self.root.after(1000, self.refresh_windows)
 
     def _fill_minibar_inner(self):
-        c = self.mb_canvas
-        c.delete("all")
-        self._mb_imgs = []   # libère les images du rendu précédent
-        self._mb_icons_pending = False
-        n = len(self.order)
-        R, GAP = self.MB_R, self.MB_GAP
-        HALO = 10            # marge pour que le halo ne soit jamais coupé
-        cell = 2 * R + GAP
-        w = HALO + max(1, n) * cell - GAP + HALO + 54  # +54 : cadenas + restaurer
-        h = self.MB_H
-        c.configure(width=w)
-        cy = h // 2
-
-        for i, name in enumerate(self.order):
-            cx = HALO + R + i * cell
-            cls = self.klass.get(name, "")
-            glyph, color = CLASS_STYLE.get(cls, CLASS_DEFAULT)
-            active = (i == self.current_index)
-            tag = f"mb{i}"
-            hwnd = self.windows.get(name)
-
-            # jeton haute qualité (Pillow) : halo + anneau + icône, anti-aliasé
-            # (si l'icône n'est pas encore publiée par Dofus, le jeton n'est
-            # pas mis en cache -> on replanifie un rendu un peu plus tard)
-            if hwnd and (hwnd, R, color, active) not in _TOKEN_CACHE:
-                self._mb_icons_pending = True
-            token = make_token_pil(hwnd, R, color, active) if hwnd else None
-            if token is not None:
-                self._mb_imgs.append(token)
-                c.create_image(cx, cy, image=token, tags=tag)
+        style, orient = self._mb_style_orient()
+        entries = [(n, CLASS_STYLE.get(self.klass.get(n, ""), CLASS_DEFAULT)[1],
+                    self.windows.get(n)) for n in self.order]
+        active = (self.current_index
+                  if 0 <= self.current_index < len(entries) else -1)
+        locked = bool(self.cfg.get("minibar_locked", False))
+        key = (style, orient, tuple(entries), active, locked)
+        frame = self._mb_frames.get(key)
+        if frame is None:
+            im, lay, complete = mb_build(style, orient, entries, active,
+                                         locked, mb_window_icon)
+            frame = (ImageTk.PhotoImage(im), lay, complete)
+            if complete:      # une image avec icône manquante n'est pas gardée
+                if len(self._mb_frames) >= 48:
+                    self._mb_frames.clear()
+                self._mb_frames[key] = frame
+        ph, lay, complete = frame
+        self._mb_imgs = [ph]
+        self._mb_lay, self._mb_entries = lay, entries
+        prev_m = self._mb_m
+        mx, my = mb_margins(orient)
+        self._mb_m = (mx, my)
+        bw, bh = lay["size"]
+        cv = self.mb_canvas
+        cv.configure(width=bw + 2 * mx, height=bh + 2 * my)
+        cv.itemconfig(self._mb_img_item, image=ph)
+        cv.coords(self._mb_img_item, mx, my)
+        if prev_m is not None and prev_m != (mx, my):
+            # style / orientation changés : la barre garde sa place à l'écran
+            if self.mb_visible:
+                bx, by = self.mb.winfo_x() + prev_m[0], self.mb.winfo_y() + prev_m[1]
+                bx, by = self._mb_clamp(bx, by)
+                self._mb_move_bar(bx, by)
+                self.cfg["minibar_pos"] = [bx, by]
+                self.save_config()
             else:
-                # repli canvas si Pillow indisponible ou pas d'icône
-                if active:
-                    for k, wdt in ((7, 1), (5, 1), (3, 2)):
-                        c.create_oval(cx - R - k, cy - R - k,
-                                      cx + R + k, cy + R + k,
-                                      outline=C_ACCENT, width=wdt, tags=tag)
-                c.create_oval(cx - R, cy - R, cx + R, cy + R,
-                              fill="#16161e", outline=color,
-                              width=2, tags=tag)
-                pico = window_icon_pil(hwnd, int((R - 3) * 2)) if hwnd else None
-                if pico is not None:
-                    tkimg = ImageTk.PhotoImage(pico)
-                    self._mb_imgs.append(tkimg)
-                    c.create_image(cx, cy, image=tkimg, tags=tag)
-                else:
-                    abbr = CLASS_ABBR.get(cls, "?")
-                    c.create_text(cx, cy, text=abbr, fill=color,
-                                  font=("Segoe UI", 8, "bold"), tags=tag)
-
-            # badge numéro (petit disque en bas à droite du jeton)
-            bx, by = cx + R - 5, cy + R - 5
-            c.create_oval(bx - 7, by - 7, bx + 7, by + 7,
-                          fill=C_ACCENT if active else "#2b2b2b",
-                          outline="#16161e", tags=tag)
-            c.create_text(bx, by, text=str(i + 1),
-                          fill="#16161e" if active else C_TEXT_2,
-                          font=("Segoe UI", 7, "bold"), tags=tag)
-
-            # clic = focus / glisser = déplacer (seuil de 5 px)
-            c.tag_bind(tag, "<ButtonPress-1>",
-                       lambda e, i=i: self.mb_press(e, i))
-            c.tag_bind(tag, "<Enter>", lambda e: c.configure(cursor="hand2"))
-            c.tag_bind(tag, "<Leave>", lambda e: c.configure(cursor=""))
-
-        # bouton cadenas : verrouille/déverrouille le déplacement
-        locked = self.cfg.get("minibar_locked", False)
-        lx = w - 40
-        lock_col = C_ACCENT if locked else "#9a9a9a"
-        c.create_oval(lx - 11, cy - 11, lx + 11, cy + 11,
-                      fill=C_CARD_ACT if locked else "#16161e",
-                      outline=C_ACCENT if locked else C_STROKE,
-                      tags="mblock")
-        lock_img = make_lock_icon(15, locked, lock_col)
-        if lock_img is not None:
-            self._mb_imgs.append(lock_img)
-            c.create_image(lx, cy, image=lock_img, tags="mblock")
-        else:
-            c.create_text(lx, cy, text="L" if locked else "l",
-                          fill=lock_col, font=("Segoe UI", 9, "bold"),
-                          tags="mblock")
-        c.tag_bind("mblock", "<ButtonPress-1>", self._mb_toggle_lock)
-        c.tag_bind("mblock", "<Enter>",
-                   lambda e: c.configure(cursor="hand2"))
-        c.tag_bind("mblock", "<Leave>",
-                   lambda e: c.configure(cursor=""))
-
-        # bouton restaurer : petit jeton discret en bout de ligne
-        bx = w - 16
-        c.create_oval(bx - 10, cy - 10, bx + 10, cy + 10, fill="#16161e",
-                      outline=C_STROKE, tags="mbrestore")
-        c.create_text(bx, cy, text="\u25a3", fill=C_TEXT_2,
-                      font=("Segoe UI", 8), tags="mbrestore")
-        c.tag_bind("mbrestore", "<ButtonPress-1>",
-                   lambda e: self.mb_press(e, -1))
-        c.tag_bind("mbrestore", "<Enter>",
-                   lambda e: c.configure(cursor="hand2"))
-        c.tag_bind("mbrestore", "<Leave>",
-                   lambda e: c.configure(cursor=""))
-
-        c.bind("<B1-Motion>", self.mb_drag)
-        c.bind("<ButtonRelease-1>", self.mb_release)
-
+                self._place_minibar()
+        # pseudo affiché un instant quand le perso actif change (capsule, dock)
+        prev_active, self._mb_prev_active = self._mb_prev_active, active
+        if (style != "classic" and prev_active is not None
+                and active != prev_active and active >= 0):
+            self._mb_auto_tip = active
+            if self._mb_tip_job is not None:
+                self.root.after_cancel(self._mb_tip_job)
+            self._mb_tip_job = self.root.after(1500, self._mb_auto_tip_end)
+        self._mb_tip_refresh()
         # des icônes manquaient (Dofus pas encore prêt) : on retente bientôt,
         # au plus quelques fois, jusqu'à ce que toutes soient récupérées
-        if self._mb_icons_pending:
+        if not complete:
             tries = getattr(self, "_mb_icon_tries", 0)
             if tries < 15:
                 self._mb_icon_tries = tries + 1
@@ -1669,11 +2045,96 @@ class App:
         else:
             self._mb_icon_tries = 0
 
+    # ----- survol, info-bulle (pseudo) -----
+    def _mb_hit(self, x, y):
+        if self._mb_lay is None or self._mb_m is None:
+            return None
+        return mb_hit(self._mb_lay, x - self._mb_m[0], y - self._mb_m[1])
+
+    def _mb_tip_side(self):
+        """Côté de la barre où poser l'info-bulle, selon sa place à l'écran."""
+        style, orient = self._mb_style_orient()
+        mx, my = self._mb_m
+        bw, bh = self._mb_lay["size"]
+        vx, vy, vw, vh = self._virtual_screen()
+        try:
+            wx, wy = self.mb.winfo_x(), self.mb.winfo_y()
+        except Exception:
+            wx = wy = 0
+        if orient == "h":
+            return "up" if (wy + my) - vy >= MB_TIP_M else "down"
+        return "right" if (wx + mx + bw / 2.0) < vx + vw / 2.0 else "left"
+
+    def _mb_tip_show(self, i):
+        if not (0 <= i < len(self._mb_entries)):
+            self._mb_tip_hide()
+            return
+        name, col, _hw = self._mb_entries[i]
+        txt = "%d · %s" % (i + 1, name if len(name) <= 24 else name[:23] + "…")
+        side = self._mb_tip_side()
+        cached = self._mb_tip_cache.get((txt, side))
+        if cached is None:
+            img, pt = mb_tip_image(txt, col, side)
+            if img is None:
+                return
+            if len(self._mb_tip_cache) > 60:
+                self._mb_tip_cache.clear()
+            cached = (ImageTk.PhotoImage(to_colorkey(img)), pt)
+            self._mb_tip_cache[(txt, side)] = cached
+        ph, pt = cached
+        tx, ty = mb_tip_place(self._mb_lay, i, side, pt)
+        cv = self.mb_canvas
+        cv.itemconfig(self._mb_tip_item, image=ph, state="normal")
+        cv.coords(self._mb_tip_item, self._mb_m[0] + tx, self._mb_m[1] + ty)
+        cv.tag_raise(self._mb_tip_item)
+
+    def _mb_tip_hide(self):
+        self.mb_canvas.itemconfig(self._mb_tip_item, state="hidden")
+
+    def _mb_tip_refresh(self):
+        i = self._mb_hover if self._mb_hover >= 0 else self._mb_auto_tip
+        if i >= 0:
+            self._mb_tip_show(i)
+        else:
+            self._mb_tip_hide()
+
+    def _mb_auto_tip_end(self):
+        self._mb_tip_job = None
+        self._mb_auto_tip = -1
+        if self.mb is not None:
+            self._mb_tip_refresh()
+
+    def _mb_on_motion(self, event):
+        hit = self._mb_hit(event.x, event.y)
+        i = hit[1] if hit and hit[0] == "tok" else -1
+        try:
+            self.mb_canvas.configure(
+                cursor="hand2" if hit and hit[0] in ("tok", "lock") else "")
+        except Exception:
+            pass
+        if i != self._mb_hover:
+            self._mb_hover = i
+            self._mb_tip_refresh()
+
+    def _mb_on_leave(self, event):
+        self._mb_hover = -1
+        try:
+            self.mb_canvas.configure(cursor="")
+        except Exception:
+            pass
+        self._mb_tip_refresh()
+
+    # ----- clics, déplacement, menu -----
+    def _mb_on_press(self, event):
+        hit = self._mb_hit(event.x, event.y)
+        if hit is None:
+            return
+        kind, i = hit
+        self.mb_press(event, i if kind == "tok" else (-2 if kind == "lock" else -1))
+
     def _mb_toggle_lock(self, event=None):
         self.cfg["minibar_locked"] = not self.cfg.get("minibar_locked", False)
         self.save_config()
-        if hasattr(self, "var_mblock"):
-            self.var_mblock.set(self.cfg["minibar_locked"])
         self.fill_minibar()   # redessine le cadenas dans son nouvel état
 
     def mb_press(self, event, index):
@@ -1688,11 +2149,14 @@ class App:
         d = getattr(self, "_mb_drag", None)
         if not d:
             return
-        if self.cfg.get("minibar_locked", False):
-            return   # verrouillée : pas de déplacement, mais le clic marche
         if not d["moved"]:
             if (abs(event.x_root - d["x0"]) < 5
                     and abs(event.y_root - d["y0"]) < 5):
+                return
+            if self.cfg.get("minibar_locked", False):
+                # verrouillée : pas de déplacement, et ce n'était pas un clic
+                # (sinon tenter de la glisser changerait de perso par erreur)
+                d["cancel"] = True
                 return
             d["moved"] = True
         self.mb.geometry(f"+{event.x_root - d['dx']}+{event.y_root - d['dy']}")
@@ -1703,12 +2167,149 @@ class App:
         if not d:
             return
         if d["moved"]:
-            self.cfg["minibar_pos"] = [self.mb.winfo_x(), self.mb.winfo_y()]
+            mx, my = self._mb_m
+            self.cfg["minibar_pos"] = [self.mb.winfo_x() + mx,
+                                       self.mb.winfo_y() + my]
             self.save_config()
-        elif d["index"] == -1:
-            self.restore_from_tray()
+        elif d.get("cancel"):
+            pass
+        elif d["index"] == -2:
+            self._mb_toggle_lock()
         elif d["index"] >= 0:
             self.go_to(d["index"])
+
+    def _mb_context_menu(self, event):
+        """Clic droit sur la barre : rouvrir Kali, verrouiller, style."""
+        m = tk.Menu(self.mb, tearoff=0, bg=C_CARD, fg=C_TEXT,
+                    activebackground=C_ACCENT_D, activeforeground=C_TEXT,
+                    bd=0, font=self.f_small)
+        m.add_command(label="Ouvrir Kali", command=self.restore_from_tray)
+        locked = self.cfg.get("minibar_locked", False)
+        m.add_command(label=("Déverrouiller la mini-barre" if locked
+                             else "Verrouiller la mini-barre"),
+                      command=self._mb_toggle_lock)
+        m.add_command(label="Style et orientation…",
+                      command=self.minibar_style_dialog)
+        try:
+            m.tk_popup(event.x_root, event.y_root)
+        finally:
+            m.grab_release()
+
+    # ----- réglage du style, avec aperçu en direct -----
+    def apply_minibar_style(self, style, orient):
+        self.cfg["minibar_style"] = style if style in dict(MB_STYLES) else "classic"
+        self.cfg["minibar_orient"] = "v" if orient == "v" else "h"
+        self.save_config()
+        self._mb_frames.clear()
+        self._mb_prev_active = None     # pas d'info-bulle automatique ici
+        if self.mb is not None:
+            self.fill_minibar()
+
+    def _mb_preview_data(self):
+        """Persos réels si des Dofus sont ouverts, sinon des persos de démo."""
+        if self.order:
+            entries = [(n, CLASS_STYLE.get(self.klass.get(n, ""),
+                                           CLASS_DEFAULT)[1],
+                        self.windows.get(n)) for n in self.order]
+            active = (self.current_index if 0 <= self.current_index
+                      < len(entries) else min(2, len(entries) - 1))
+            return entries, mb_window_icon, active
+        return ([(nm, col, None) for nm, col in MB_DEMO],
+                lambda i, e, size: _mb_fake_icon(size, e[1]), 2)
+
+    def minibar_style_dialog(self):
+        """Choix du style et de l'orientation, avec aperçu fidèle en direct."""
+        if not PIL_OK:
+            messagebox.showinfo(
+                APP_TITLE,
+                "Les styles de mini-barre ont besoin du rendu d'images "
+                "(Pillow), indisponible dans cette installation. "
+                "Voir ⚙ > Diagnostic.")
+            return
+        if self._mb_dlg is not None:
+            try:
+                self._mb_dlg.lift()
+                self._mb_dlg.focus_force()
+                return
+            except Exception:
+                self._mb_dlg = None
+        cur_style, cur_orient = self._mb_style_orient()
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Style de la mini-barre")
+        dlg.configure(bg=C_BG)
+        dlg.resizable(False, False)
+        dlg.attributes("-topmost", True)
+        try:   # barre de titre sombre (Windows 11)
+            dlg.update_idletasks()
+            h = GetAncestor(int(dlg.winfo_id()), 2) or int(dlg.winfo_id())
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                h, 20, ctypes.byref(ctypes.c_int(1)), 4)
+        except Exception:
+            pass
+        sv, ov = tk.StringVar(value=cur_style), tk.StringVar(value=cur_orient)
+        PW, PH = 540, 340
+        entries, icon_fn, act = self._mb_preview_data()
+        body = tk.Frame(dlg, bg=C_BG)
+        body.pack(padx=18, pady=(16, 8))
+        cv = tk.Canvas(body, width=PW, height=PH, bg=C_BG, bd=0,
+                       highlightthickness=0)
+        item = cv.create_image(0, 0, anchor="nw", image="")
+
+        def refresh():
+            im = mb_preview_image(sv.get(), ov.get(), entries, act,
+                                  bool(self.cfg.get("minibar_locked", False)),
+                                  icon_fn, (PW, PH))
+            cv._ph = ImageTk.PhotoImage(im)
+            cv.itemconfig(item, image=cv._ph)
+
+        left = tk.Frame(body, bg=C_BG)
+        left.pack(side="left", fill="y", padx=(0, 16))
+
+        def section(txt, first=False):
+            tk.Label(left, text=txt, bg=C_BG, fg=C_TEXT_2, font=self.f_small,
+                     anchor="w").pack(fill="x", pady=(0 if first else 14, 4))
+
+        def radio(txt, val, var):
+            tk.Radiobutton(left, text=txt, value=val, variable=var,
+                           command=refresh, bg=C_BG, fg=C_TEXT,
+                           selectcolor=C_CARD, activebackground=C_BG,
+                           activeforeground=C_TEXT, font=self.f_body,
+                           anchor="w", bd=0, highlightthickness=0,
+                           cursor="hand2").pack(fill="x", pady=1)
+
+        section("Style", first=True)
+        for sid, label in MB_STYLES:
+            radio(label, sid, sv)
+        section("Orientation")
+        radio("Horizontale", "h", ov)
+        radio("Verticale", "v", ov)
+        cv.pack(side="left")
+
+        def close():
+            self._mb_dlg = None
+            dlg.destroy()
+
+        def apply():
+            self.apply_minibar_style(sv.get(), ov.get())
+            close()
+
+        row = tk.Frame(dlg, bg=C_BG)
+        row.pack(pady=(4, 16))
+        for txt, cmd, bg in (("Appliquer", apply, C_ACCENT_D),
+                             ("Annuler", close, C_CARD)):
+            tk.Button(row, text=txt, command=cmd, bg=bg, fg=C_TEXT,
+                      activebackground=C_ACCENT_D, activeforeground=C_TEXT,
+                      relief="flat", bd=0, padx=22, pady=7, font=self.f_body,
+                      cursor="hand2").pack(side="left", padx=6)
+        dlg.bind("<Escape>", lambda e: close())
+        dlg.protocol("WM_DELETE_WINDOW", close)
+        refresh()
+        dlg.update_idletasks()
+        sw, sh = dlg.winfo_screenwidth(), dlg.winfo_screenheight()
+        dlg.geometry(f"+{(sw - dlg.winfo_reqwidth()) // 2}"
+                     f"+{(sh - dlg.winfo_reqheight()) // 3}")
+        self._mb_dlg = dlg
+        self._mb_dlg_hooks = (sv, ov, refresh, apply)   # (tests)
 
     def make_button(self, parent, text, cmd):
         b = tk.Label(parent, text=text, bg=C_CARD, fg=C_TEXT, font=self.f_small,
@@ -1735,7 +2336,8 @@ class App:
             wins = enum_dofus_windows()
         except Exception:
             return   # énumération impossible (fenêtre en train de mourir)
-        _TOKEN_CACHE.clear()   # icônes/jetons potentiellement obsolètes
+        _MB_ICON_CACHE.clear()   # icônes potentiellement obsolètes
+        self._mb_frames.clear()
         # noms uniques : si deux fenêtres ont le même titre (ex: deux "Dofus"
         # pas encore connectés), on suffixe (2), (3)...
         self.windows = {}
@@ -1937,6 +2539,8 @@ class App:
         # ▸ Mini-barre
         mb = self._submenu(m)
         self.var_minibar = tk.BooleanVar(value=self.cfg.get("minibar", True))
+        mb.add_command(label="Style et orientation…",
+                       command=self.minibar_style_dialog)
         mb.add_checkbutton(label="Afficher en mode réduit",
                            variable=self.var_minibar,
                            command=self.on_toggle_minibar,
@@ -2059,6 +2663,9 @@ class App:
                "Rendu images (Pillow) : "
                + ("actif" if PIL_OK
                   else f"INDISPONIBLE\n   cause : {PIL_ERROR}") + "\n")
+        if PIL_OK and ImageFont is None:
+            txt += ("Textes de la mini-barre : INDISPONIBLES (module de "
+                    "polices absent de cet exe : numéros et pseudos masqués)\n")
         if not PIL_OK:
             if frozen:
                 others = find_other_kali_exes()
