@@ -119,7 +119,7 @@ VK_CODES = {
 }
 
 APP_TITLE = "Kali"
-APP_VERSION = "5.2"
+APP_VERSION = "5.3"
 
 # Style par classe : (glyphe d'arme stylisé, couleur) — dessins génériques,
 # aucune ressource Ankama. Détecté depuis le titre "Nom - Classe - ...".
@@ -526,8 +526,11 @@ MB_ACCENT = (76, 194, 255)
 MB_CARD_ACT = (15, 58, 95)
 MB_TIP_M = 40        # marge réservée à l'info-bulle (barre horizontale)
 MB_TIP_W = 240       # idem (barre verticale)
+MB_SCALE_MIN, MB_SCALE_MAX = 60, 160     # taille de la barre, en %
 MB_TIP_X = 96        # marge latérale (barre horizontale) : le pseudo d'un
                      # jeton situé en bout de barre dépasse de chaque côté
+MB_DOCK = {"BASE": 15, "PEAK": 27, "G": 6, "PAD": 14, "MG": 4, "BAR": 46,
+           "OVER": 22, "EDGE": 7, "SPREAD": 2.6, "LOCK": 42}
 MB_DEMO = (("Skiouw-Iop", "#e07a3c"), ("Skiouw-Panda", "#d4b98a"),
            ("Skiouw-Elio", "#7ab8ff"), ("Skiouw-Eni", "#f08fc0"),
            ("Skiouw-Forge", "#8a9ab8"), ("Skiouw-Sadi", "#4faf6e"),
@@ -574,8 +577,9 @@ def _mb_over_dark(c, a):
 class _MBPaint:
     """Dessin supersamplé : coordonnées logiques (1x), rendu x3 puis réduit."""
 
-    def __init__(self, w, h):
-        self.w, self.h = int(math.ceil(w)), int(math.ceil(h))
+    def __init__(self, w, h, k=1.0):
+        self.s = MB_SS * k          # pixels de travail par unité logique
+        self.w, self.h = int(math.ceil(w * k)), int(math.ceil(h * k))
         self.im = Image.new("RGBA", (self.w * MB_SS, self.h * MB_SS),
                             (0, 0, 0, 0))
         self.d = ImageDraw.Draw(self.im)
@@ -584,30 +588,29 @@ class _MBPaint:
     def _c(c):
         return None if c is None else tuple(c) + (255,)
 
-    @staticmethod
-    def _w(v):
-        return max(1, int(round(v * MB_SS)))
+    def _w(self, v):
+        return max(1, int(round(v * self.s)))
 
     def circle(self, cx, cy, r, fill=None, outline=None, width=1):
-        s = MB_SS
+        s = self.s
         self.d.ellipse((cx * s - r * s, cy * s - r * s, cx * s + r * s,
                         cy * s + r * s), fill=self._c(fill),
                        outline=self._c(outline), width=self._w(width))
 
     def rrect(self, x0, y0, x1, y1, rad, fill=None, outline=None, width=1):
-        s = MB_SS
+        s = self.s
         self.d.rounded_rectangle((x0 * s, y0 * s, x1 * s, y1 * s),
                                  radius=rad * s, fill=self._c(fill),
                                  outline=self._c(outline),
                                  width=self._w(width))
 
     def line(self, x0, y0, x1, y1, col, width=1):
-        s = MB_SS
+        s = self.s
         self.d.line((x0 * s, y0 * s, x1 * s, y1 * s), fill=self._c(col),
                     width=self._w(width))
 
     def arc(self, x0, y0, x1, y1, a0, a1, col, width=1):
-        s = MB_SS
+        s = self.s
         self.d.arc((x0 * s, y0 * s, x1 * s, y1 * s), a0, a1,
                    fill=self._c(col), width=self._w(width))
 
@@ -644,14 +647,14 @@ def _mb_ring(col, active):
     return MB_ACCENT if active else col
 
 
-def _mb_classic(n, orient, active, locked, entries):
+def _mb_classic(n, orient, active, locked, entries, k, anim=None):
     """Jetons ronds flottants, halo bleu sur l'actif, badges numérotés."""
     R, GAP, HALO, LR = 21, 14, 10, 11
     cell = 2 * R + GAP
     cross = 2 * (R + HALO) + 4
     L = HALO + n * cell - GAP + 14 + 2 * LR + HALO
     W, H = (L, cross) if orient == "h" else (cross, L)
-    p, cc = _MBPaint(W, H), cross / 2.0
+    p, cc = _MBPaint(W, H, k), cross / 2.0
     icons, texts, cells, tips = [], [], [], []
     for i, (name, col, hw) in enumerate(entries):
         a = HALO + R + i * cell
@@ -679,10 +682,10 @@ def _mb_classic(n, orient, active, locked, entries):
     p.lock(lx, ly, LR * 1.15, MB_ACCENT if locked else (154, 154, 154), locked)
     lock = (lx - LR - 2, ly - LR - 2, lx + LR + 2, ly + LR + 2)
     return p, icons, texts, {"size": (W, H), "cells": cells, "lock": lock,
-                             "bar": None, "tips": tips}
+                             "bar": None, "tips": tips, "core": (0, 0, W, H)}
 
 
-def _mb_capsule(n, orient, active, locked, entries):
+def _mb_capsule(n, orient, active, locked, entries, k, anim=None):
     """Pilule sombre contenant les jetons ; l'actif est agrandi et cerclé."""
     R, GAP, PAD, MG = 19, 8, 12, 4
     cell = 2 * R + GAP
@@ -693,7 +696,7 @@ def _mb_capsule(n, orient, active, locked, entries):
     L = al + 9 + 12
     W, H = ((L + 2 * MG, chh + 2 * MG) if orient == "h"
             else (chh + 2 * MG, L + 2 * MG))
-    p, cc = _MBPaint(W, H), MG + chh / 2.0
+    p, cc = _MBPaint(W, H, k), MG + chh / 2.0
     p.rrect(*_mb_rect(orient, MG, MG, MG + L, MG + chh), chh / 2.0,
             fill=MB_PANEL, outline=MB_BORDER, width=1)
     icons, texts, cells, tips = [], [], [], []
@@ -726,38 +729,129 @@ def _mb_capsule(n, orient, active, locked, entries):
     lock = (lx - 12, ly - 12, lx + 12, ly + 12)
     bar = _mb_rect(orient, MG, MG, MG + L, MG + chh)
     return p, icons, texts, {"size": (W, H), "cells": cells, "lock": lock,
-                             "bar": bar, "tips": tips}
+                             "bar": bar, "tips": tips, "core": (0, 0, W, H)}
 
 
-def _mb_dock(n, orient, active, locked, entries):
-    """Façon dock : l'actif est grand, ses voisins moyens, les autres petits."""
-    G, PAD, MG, BAR, OVER, EDGE = 6, 14, 4, 46, 22, 7
+def _mb_bump(d):
+    """Profil du zoom : 1 sous le pointeur, 0 à `SPREAD` cellules de distance."""
+    sp = MB_DOCK["SPREAD"]
+    return 0.5 * (1 + math.cos(math.pi * d / sp)) if d < sp else 0.0
 
-    def radii(act):
-        return [{0: 27, 1: 21, 2: 18}.get(abs(i - act) if act >= 0 else 9, 15)
-                for i in range(n)]
-    rs = radii(active)
-    # longueur FIXE (indépendante de l'actif) : la fenêtre ne bouge pas
-    widest = max([sum(2 * r for r in radii(a)) for a in range(max(n, 1))]
-                 + [sum(2 * r for r in rs)])
-    xt = PAD + widest + max(n - 1, 0) * G
-    al = xt + 12 + 9
-    L = al + 9 + 12
-    c0 = MG + OVER if orient == "h" else MG       # bord « fixe » de la barre
+
+def mb_dock_radii_idle(n, active):
+    """Rayons au repos : l'actif est grand, ses voisins moyens, les autres petits."""
+    return [{0: 27, 1: 21, 2: 18}.get(abs(i - active) if active >= 0 else 9, 15)
+            for i in range(n)]
+
+
+_MB_DOCK_GEO = {}
+
+
+def mb_dock_geo(n):
+    """Géométrie de repos du dock pour n jetons (unités logiques).
+    La capsule peut s'allonger quand on zoome : l'image réserve donc une
+    marge `slack` de chaque côté, pour que la fenêtre ne change jamais de taille."""
+    g = _MB_DOCK_GEO.get(n)
+    if g is None:
+        D = MB_DOCK
+        BASE, PEAK, G, PAD, MG, LOCK = (D["BASE"], D["PEAK"], D["G"], D["PAD"],
+                                         D["MG"], D["LOCK"])
+        cell = 2 * BASE + G
+        gaps = max(n - 1, 0) * G
+        idle_sum = max([sum(2 * r for r in mb_dock_radii_idle(n, a))
+                        for a in range(-1, n)] or [0])
+        rel = [PAD + BASE + i * cell for i in range(n)]
+        max_sum = idle_sum
+        if n:
+            steps = max(1, n * 8)
+            for t in range(steps + 1):
+                u = rel[0] + (rel[-1] - rel[0]) * t / float(steps)
+                max_sum = max(max_sum, sum(
+                    2 * (BASE + (PEAK - BASE) * _mb_bump(abs(u - c) / cell))
+                    for c in rel))
+        Lmin = PAD + 2 * BASE * n + gaps + LOCK
+        Lmax = PAD + max_sum + gaps + LOCK
+        Lidle = PAD + idle_sum + gaps + LOCK
+        slack = int(math.ceil(Lmax - Lmin)) + 6
+        left_cap = MG + slack
+        left0 = left_cap + PAD
+        g = {"slack": slack, "left_cap": left_cap, "left0": left0,
+             "centers": [left0 + BASE + i * cell for i in range(n)],
+             "Lidle": Lidle, "Lmax": Lmax,
+             "main_len": 2 * MG + 2 * slack + int(math.ceil(Lmax))}
+        _MB_DOCK_GEO[n] = g
+    return g
+
+
+def mb_dock_targets(n, active, u=None):
+    """Rayons visés : zoom façon dock autour du point `u` (le pointeur) ou,
+    sans pointeur, autour du perso actif."""
+    if u is None:
+        return [float(r) for r in mb_dock_radii_idle(n, active)]
+    D = MB_DOCK
+    cell = 2 * D["BASE"] + D["G"]
+    return [D["BASE"] + (D["PEAK"] - D["BASE"]) * _mb_bump(abs(u - c) / cell)
+            for c in mb_dock_geo(n)["centers"]]
+
+
+def _mb_interp(x, xs, ys):
+    """Interpolation linéaire par morceaux (prolongée linéairement aux bouts)."""
+    n = len(xs)
+    if n == 0:
+        return x
+    if n == 1:
+        return ys[0] + (x - xs[0])
+    i = 0
+    while i < n - 2 and x > xs[i + 1]:
+        i += 1
+    dx = xs[i + 1] - xs[i]
+    return ys[i] if dx == 0 else ys[i] + (ys[i + 1] - ys[i]) * (x - xs[i]) / dx
+
+
+def mb_dock_u(n, disp, px):
+    """Point de repos (u) qui se trouve sous le pointeur `px`, d'après les
+    centres actuellement affichés `disp` (même repère, unités logiques)."""
+    return _mb_interp(px, disp, mb_dock_geo(n)["centers"])
+
+
+def _mb_dock(n, orient, active, locked, entries, k, anim=None):
+    """Façon dock. Sans `anim` : zoom autour du perso actif (statique).
+    Avec `anim` = {"radii", "w", "pivot": (u, px)} : zoom animé qui suit le
+    pointeur ; le point u reste sous le pointeur (comme sur macOS)."""
+    D = MB_DOCK
+    G, MG, BAR, OVER, EDGE, LOCK = (D["G"], D["MG"], D["BAR"], D["OVER"],
+                                     D["EDGE"], D["LOCK"])
+    geo = mb_dock_geo(n)
+    rs = ([float(r) for r in anim["radii"]]
+          if anim and len(anim["radii"]) == n
+          else [float(r) for r in mb_dock_radii_idle(n, active)])
+    x, a0 = geo["left0"], []
+    for r in rs:
+        a0.append(x + r)
+        x += 2 * r + G
+    nat_r = (a0[-1] + rs[-1] if n else geo["left0"]) + LOCK
+    cap_l, s = geo["left_cap"], 0.0
+    if anim is None:                       # statique : longueur constante
+        cap_r = cap_l + geo["Lidle"]
+    else:
+        pv = anim.get("pivot")
+        if pv and anim.get("w", 0) > 0 and n:
+            s = anim["w"] * (pv[1] - _mb_interp(pv[0], geo["centers"], a0))
+        s = max(MG - cap_l, min(s, geo["main_len"] - MG - nat_r))
+        cap_l, cap_r = cap_l + s, nat_r + s
+    c0 = MG + OVER if orient == "h" else MG
     c1 = c0 + BAR
-    W, H = ((L + 2 * MG, MG + OVER + BAR + MG) if orient == "h"
-            else (MG + BAR + OVER + MG, L + 2 * MG))
-    p = _MBPaint(W, H)
-    p.rrect(*_mb_rect(orient, MG, c0, MG + L, c1), BAR / 2.0,
+    cross_total = MG + OVER + BAR + MG
+    W, H = ((geo["main_len"], cross_total) if orient == "h"
+            else (cross_total, geo["main_len"]))
+    p = _MBPaint(W, H, k)
+    p.rrect(*_mb_rect(orient, cap_l, c0, cap_r, c1), BAR / 2.0,
             fill=MB_PANEL, outline=MB_BORDER, width=1)
     icons, texts, cells, tips = [], [], [], []
-    a = MG + PAD
+    full = H if orient == "h" else W
     act_pos = None
-    full = (H if orient == "h" else W)
     for i, (name, col, hw) in enumerate(entries):
-        r = rs[i]
-        ai = a + r
-        a += 2 * r + G
+        r, ai = rs[i], a0[i] + s
         c = (c1 - EDGE - r) if orient == "h" else (c0 + EDGE + r)
         x, y = _mb_xy(orient, ai, c)
         act = i == active
@@ -773,12 +867,13 @@ def _mb_dock(n, orient, active, locked, entries):
     if act_pos is not None:
         dx, dy = _mb_xy(orient, act_pos, (c1 - 3.2) if orient == "h" else (c0 + 3.2))
         p.circle(dx, dy, 2.2, fill=MB_ACCENT)
-    lx, ly = _mb_xy(orient, MG + al, (c0 + c1) / 2.0)
+    lx, ly = _mb_xy(orient, cap_r - LOCK / 2.0, (c0 + c1) / 2.0)
     p.lock(lx, ly, 10.4, MB_ACCENT if locked else (154, 154, 154), locked)
     lock = (lx - 12, ly - 12, lx + 12, ly + 12)
-    bar = _mb_rect(orient, MG, c0, MG + L, c1)
+    bar = _mb_rect(orient, cap_l, c0, cap_r, c1)
+    core = _mb_rect(orient, geo["left_cap"], 0, geo["left_cap"] + geo["Lidle"], full)
     return p, icons, texts, {"size": (W, H), "cells": cells, "lock": lock,
-                             "bar": bar, "tips": tips}
+                             "bar": bar, "tips": tips, "core": core}
 
 
 def _mb_fallback_icon(size, col_hex):
@@ -790,17 +885,29 @@ def _mb_fallback_icon(size, col_hex):
     return im.resize((size, size), Image.LANCZOS)
 
 
-def mb_build(style, orient, entries, active, locked, icon_fn, flatten=True):
+def _mb_scale_lay(lay, k, size):
+    f = lambda r: tuple(v * k for v in r)
+    return {"size": size, "cells": [f(c) for c in lay["cells"]],
+            "lock": f(lay["lock"]), "bar": f(lay["bar"]) if lay["bar"] else None,
+            "core": f(lay["core"]),
+            "tips": [(x * k, y * k, rr * k) for (x, y, rr) in lay["tips"]]}
+
+
+def mb_build(style, orient, entries, active, locked, icon_fn, flatten=True,
+             scale=1.0, anim=None):
     """Image de la barre. entries = [(pseudo, couleur_hex, hwnd)].
     icon_fn(i, entry, taille) -> image Pillow ronde ou None.
+    scale : taille relative (1.0 = 100 %). anim : état du zoom animé (dock).
     Retourne (image, mise en page, toutes_icônes_trouvées)."""
     orient = "v" if orient == "v" else "h"
+    k = float(scale)
     fn = {"capsule": _mb_capsule, "dock": _mb_dock}.get(style, _mb_classic)
-    p, icons, texts, lay = fn(len(entries), orient, active, locked, entries)
+    p, icons, texts, lay = fn(len(entries), orient, active, locked, entries,
+                              k, anim)
     im = p.done()
     complete = True
     for (x, y, r, i, dim) in icons:
-        size = max(8, int(round(2 * r)))
+        size = max(8, int(round(2 * r * k)))
         ic = icon_fn(i, entries[i], size)
         if ic is None:
             complete = False
@@ -809,16 +916,18 @@ def mb_build(style, orient, entries, active, locked, icon_fn, flatten=True):
             dk = Image.new("RGBA", ic.size, MB_DARK + (255,))
             dk.putalpha(ic.getchannel("A"))
             ic = Image.blend(ic, dk, dim)
-        im.alpha_composite(ic, (int(round(x - size / 2.0)),
-                                int(round(y - size / 2.0))))
+        im.alpha_composite(ic, (int(round(x * k - size / 2.0)),
+                                int(round(y * k - size / 2.0))))
     d = ImageDraw.Draw(im)
     for (x, y, s, px, col) in texts:
-        f = mb_font(px)
+        f = mb_font(max(6, int(round(px * k))))
         if f is not None:
             try:
-                d.text((x, y), s, font=f, fill=tuple(col) + (255,), anchor="mm")
+                d.text((x * k, y * k), s, font=f, fill=tuple(col) + (255,),
+                       anchor="mm")
             except Exception:
                 pass
+    lay = _mb_scale_lay(lay, k, im.size)
     return (to_colorkey(im) if flatten else im), lay, complete
 
 
@@ -941,16 +1050,16 @@ def mb_backdrop(w, h):
     return _MB_BACKDROPS[k].copy()
 
 
-def mb_preview_image(style, orient, entries, active, locked, icon_fn, box):
+def mb_preview_image(style, orient, entries, active, locked, icon_fn, box,
+                     scale=1.0):
     """Aperçu fidèle de la barre (même rendu que la vraie) sur un décor de
-    jeu, centré et réduit au besoin pour tenir dans box=(largeur, hauteur)."""
+    jeu, centré et réduit au besoin pour tenir dans box=(largeur, hauteur).
+    Retourne (image, rapport) ; rapport < 1 si l'aperçu a dû être réduit."""
     orient = "v" if orient == "v" else "h"
     im, lay, _ = mb_build(style, orient, entries, active, locked, icon_fn,
-                          flatten=False)
+                          flatten=False, scale=scale)
     bw, bh = lay["size"]
     mx, my = mb_margins(orient)
-    if orient == "v":
-        mx = 8 if style == "classic" else mx          # place pour l'info-bulle
     scene = Image.new("RGBA", (bw + 2 * mx, bh + 2 * my), (0, 0, 0, 0))
     scene.alpha_composite(im, (mx, my))
     if style != "classic" and 0 <= active < len(entries):
@@ -960,6 +1069,9 @@ def mb_preview_image(style, orient, entries, active, locked, icon_fn, box):
         if tip is not None:
             tx, ty = mb_tip_place(lay, active, side, pt)
             scene.alpha_composite(tip, (mx + tx, my + ty))
+    bb = scene.getbbox()
+    if bb:
+        scene = scene.crop(bb)
     k = min(1.0, (box[0] - 16) / float(scene.width),
             (box[1] - 16) / float(scene.height))
     if k < 1.0:
@@ -968,7 +1080,7 @@ def mb_preview_image(style, orient, entries, active, locked, icon_fn, box):
     out = mb_backdrop(box[0], box[1]).convert("RGBA")
     out.alpha_composite(scene, ((box[0] - scene.width) // 2,
                                 (box[1] - scene.height) // 2))
-    return out.convert("RGB")
+    return out.convert("RGB"), k
 # ==== MINI-BARRE : FIN ====
 
 
@@ -987,6 +1099,64 @@ def mb_window_icon(i, entry, size):
         if ic is not None:
             _MB_ICON_CACHE[k] = ic
     return ic
+
+
+def capture_window_image(hwnd):
+    """Capture le contenu d'une fenêtre, même invisible (opacité 0) ou cachée
+    derrière une autre, avec PrintWindow. Retourne (image RGB, (gauche, haut))
+    ou None si impossible ou si l'image est vide/uniforme (le zoom retombe
+    alors sur un simple fondu : jamais d'animation avec une image noire)."""
+    if not PIL_OK:
+        return None
+    hdc = mem = hbmp = oldobj = None
+    raw = None
+    try:
+        rect = wt.RECT()
+        if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            return None
+        w, h = rect.right - rect.left, rect.bottom - rect.top
+        if not (16 <= w <= 3000 and 16 <= h <= 3000):
+            return None
+        hdc = user32.GetDC(0)
+        if not hdc:
+            return None
+        mem = gdi32.CreateCompatibleDC(hdc)
+        if not mem:
+            return None
+        bmi = BITMAPINFOHEADER()
+        bmi.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+        bmi.biWidth, bmi.biHeight = w, -h
+        bmi.biPlanes, bmi.biBitCount = 1, 32
+        bits = ctypes.c_void_p()
+        hbmp = gdi32.CreateDIBSection(mem, ctypes.byref(bmi), 0,
+                                      ctypes.byref(bits), None, 0)
+        if not hbmp or not bits.value:
+            return None
+        oldobj = gdi32.SelectObject(mem, hbmp)
+        if not user32.PrintWindow(hwnd, mem, 2):   # PW_RENDERFULLCONTENT
+            return None
+        raw = ctypes.string_at(bits.value, w * h * 4)
+    except Exception:
+        return None
+    finally:
+        try:
+            if mem and oldobj:
+                gdi32.SelectObject(mem, oldobj)
+            if hbmp:
+                gdi32.DeleteObject(hbmp)
+            if mem:
+                gdi32.DeleteDC(mem)
+            if hdc:
+                user32.ReleaseDC(0, hdc)
+        except Exception:
+            pass
+    try:
+        im = Image.frombuffer("RGBA", (w, h), raw, "raw", "BGRA", 0, 1).convert("RGB")
+        if all(hi - lo < 6 for lo, hi in im.resize((16, 16)).getextrema()):
+            return None
+        return im, (rect.left, rect.top)
+    except Exception:
+        return None
 
 
 def normalize_class(txt):
@@ -1607,6 +1777,11 @@ class App:
         self._mb_tip_cache = {}
         self._mb_prev_active = None
         self._mb_dlg = None
+        self._mb_an = self._mb_an_new()   # état du zoom animé du dock
+        self._mb_ctx = None
+        self._last_geo = None      # position/taille de la fenêtre principale
+        self._opening = False      # animation d'ouverture en cours
+        self._ghost = None
         self.break_notified = 0    # heures de jeu déjà notifiées
         self.cfg = self.load_config()
 
@@ -1644,11 +1819,14 @@ class App:
 
         # clic sur l'icône de la barre des tâches (réduction) -> zone de notif
         self.root.bind("<Unmap>", self.on_unmap)
+        self.root.bind("<Configure>", self._on_root_configure, add="+")
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
-    def apply_win11_corners(self):
-        """Coins arrondis Windows 11 + présence dans la barre des tâches."""
+    def apply_win11_corners(self, cycle=True):
+        """Coins arrondis Windows 11 + présence dans la barre des tâches.
+        cycle=False : à utiliser quand la fenêtre est déjà cachée (pas de
+        masquer/réafficher, donc pas de clignotement)."""
         try:
             self.root.update_idletasks()
             hwnd = user32.GetParent(self.root.winfo_id()) or self.root.winfo_id()
@@ -1665,7 +1843,7 @@ class App:
             set_style(hwnd, GWL_EXSTYLE, style)
             # le style ne prend effet qu'après un cycle masquer/afficher,
             # MAIS seulement si Kali est censé être visible (pas en mini-barre)
-            if not self.minimized:
+            if cycle and not self.minimized:
                 self.root.withdraw()
                 self.root.after(10, self.root.deiconify)
         except Exception:
@@ -1684,7 +1862,8 @@ class App:
                "minibar": True, "auto_focus_first": True,
                "minibar_locked": False, "minibar_pos": None,
                "wheel_enabled": True, "wheel_vk": 0x05,
-               "minibar_style": "classic", "minibar_orient": "h"}
+               "minibar_style": "classic", "minibar_orient": "h",
+               "minibar_scale": 100, "minibar_anim": True, "open_anim": True}
         try:
             with open(config_path(), "r", encoding="utf-8") as f:
                 cfg.update(json.load(f))
@@ -1847,15 +2026,23 @@ class App:
             pass
 
     # ---------------- mini-barre flottante (mode réduit) ----------------
-    # 3 styles (classique / capsule / dock à zoom) x 2 orientations, choisis
-    # dans ⚙ > Mini-barre > Style et orientation… (avec aperçu en direct).
-    # La barre est UNE seule image Pillow (rendu : mb_build) ; les clics sont
-    # résolus par la géométrie (mb_hit), ce qui permet n'importe quelle forme.
+    # 3 styles (classique / capsule / dock à zoom) x 2 orientations x taille
+    # réglable, choisis dans ⚙ > Mini-barre > Style et orientation… (aperçu en
+    # direct). La barre est UNE seule image Pillow (rendu : mb_build) ; les
+    # clics sont résolus par la géométrie (mb_hit). Le dock peut être animé :
+    # zoom continu façon macOS qui suit la souris (voir _mb_anim_tick).
     def _mb_style_orient(self):
         style = self.cfg.get("minibar_style", "classic")
         if style not in dict(MB_STYLES):
             style = "classic"
         return style, ("v" if self.cfg.get("minibar_orient", "h") == "v" else "h")
+
+    def _mb_scale(self):
+        try:
+            v = float(self.cfg.get("minibar_scale", 100))
+        except Exception:
+            v = 100.0
+        return max(MB_SCALE_MIN, min(MB_SCALE_MAX, v)) / 100.0
 
     def _virtual_screen(self):
         """Bureau complet (tous les écrans) : (x, y, largeur, hauteur)."""
@@ -1866,16 +2053,25 @@ class App:
             return (0, 0, self.root.winfo_screenwidth(),
                     self.root.winfo_screenheight())
 
+    # La « position » de la barre = coin haut-gauche de sa zone « core » (la
+    # barre au repos), indépendante des marges transparentes et du zoom.
     def _mb_clamp(self, bx, by):
         """Garde la barre entièrement à l'écran."""
-        bw, bh = self._mb_lay["size"]
+        x0, y0, x1, y1 = self._mb_lay["core"]
         vx, vy, vw, vh = self._virtual_screen()
-        return (int(max(vx, min(bx, vx + vw - bw))),
-                int(max(vy, min(by, vy + vh - bh))))
+        return (int(max(vx, min(bx, vx + vw - (x1 - x0)))),
+                int(max(vy, min(by, vy + vh - (y1 - y0)))))
 
     def _mb_move_bar(self, bx, by):
         mx, my = self._mb_m
-        self.mb.geometry(f"+{bx - mx}+{by - my}")
+        x0, y0 = self._mb_lay["core"][:2]
+        self.mb.geometry(f"+{int(bx - x0 - mx)}+{int(by - y0 - my)}")
+
+    def _mb_origin(self):
+        mx, my = self._mb_m
+        x0, y0 = self._mb_lay["core"][:2]
+        return (int(self.mb.winfo_x() + mx + x0),
+                int(self.mb.winfo_y() + my + y0))
 
     def _ensure_minibar(self):
         """Crée la fenêtre mini-barre une seule fois (réutilisée ensuite)."""
@@ -1906,15 +2102,16 @@ class App:
         self.mb_visible = False
         self._mb_prev_active = None
         self._mb_m = None
+        self._mb_an = self._mb_an_new()
         mb.withdraw()
         self.fill_minibar()
         self._place_minibar()
 
     def _default_minibar_pos(self):
         """Origine par défaut de la barre : coin bas-droit de l'écran."""
-        bw, bh = self._mb_lay["size"]
-        return (self.root.winfo_screenwidth() - bw - 20,
-                self.root.winfo_screenheight() - bh - 70)
+        x0, y0, x1, y1 = self._mb_lay["core"]
+        return (self.root.winfo_screenwidth() - (x1 - x0) - 20,
+                self.root.winfo_screenheight() - (y1 - y0) - 70)
 
     def _place_minibar(self):
         if self.mb is None or self._mb_lay is None:
@@ -1961,12 +2158,14 @@ class App:
 
     def destroy_minibar(self):
         """Détruit réellement la mini-barre (à la restauration de Kali)."""
-        if self._mb_tip_job is not None:
-            try:
-                self.root.after_cancel(self._mb_tip_job)
-            except Exception:
-                pass
-            self._mb_tip_job = None
+        for job in (self._mb_tip_job, self._mb_an.get("job")):
+            if job is not None:
+                try:
+                    self.root.after_cancel(job)
+                except Exception:
+                    pass
+        self._mb_tip_job = None
+        self._mb_an = self._mb_an_new()
         if self.mb is not None:
             try:
                 self.mb.destroy()
@@ -1987,42 +2186,70 @@ class App:
             # faire tomber Kali : on retente au prochain cycle
             self.root.after(1000, self.refresh_windows)
 
+    def _mb_render(self, style, orient, entries, active, locked, k, anim):
+        im, lay, complete = mb_build(style, orient, entries, active, locked,
+                                     mb_window_icon, scale=k, anim=anim)
+        return ImageTk.PhotoImage(im), lay, complete
+
     def _fill_minibar_inner(self):
         style, orient = self._mb_style_orient()
+        k = self._mb_scale()
         entries = [(n, CLASS_STYLE.get(self.klass.get(n, ""), CLASS_DEFAULT)[1],
                     self.windows.get(n)) for n in self.order]
         active = (self.current_index
                   if 0 <= self.current_index < len(entries) else -1)
         locked = bool(self.cfg.get("minibar_locked", False))
-        key = (style, orient, tuple(entries), active, locked)
+        self._mb_ctx = (style, orient, entries, active, locked, k)
+        self._mb_entries = entries
+        if self._mb_anim_on(style):
+            an, n = self._mb_an, len(entries)
+            if an["r"] is None or len(an["r"]) != n:
+                an.update(r=mb_dock_targets(n, active, None), w=0.0,
+                          hover=False, have=False, ptr=None)
+            ph, lay, complete = self._mb_render(style, orient, entries, active,
+                                                locked, k, self._mb_anim_dict())
+            self._mb_apply_frame(ph, lay, complete, style, active)
+            self._mb_anim_kick()          # le zoom glisse vers le nouvel actif
+            return
+        key = (style, orient, tuple(entries), active, locked, k)
         frame = self._mb_frames.get(key)
         if frame is None:
-            im, lay, complete = mb_build(style, orient, entries, active,
-                                         locked, mb_window_icon)
-            frame = (ImageTk.PhotoImage(im), lay, complete)
-            if complete:      # une image avec icône manquante n'est pas gardée
+            frame = self._mb_render(style, orient, entries, active, locked, k,
+                                    None)
+            if frame[2]:      # une image avec icône manquante n'est pas gardée
                 if len(self._mb_frames) >= 48:
                     self._mb_frames.clear()
                 self._mb_frames[key] = frame
-        ph, lay, complete = frame
-        self._mb_imgs = [ph]
-        self._mb_lay, self._mb_entries = lay, entries
-        prev_m = self._mb_m
+        self._mb_apply_frame(frame[0], frame[1], frame[2], style, active)
+
+    def _mb_apply_frame(self, ph, lay, complete, style, active, retry=True):
+        """Affiche une image de barre : taille de la fenêtre, position,
+        info-bulle, nouvelle tentative si des icônes manquent."""
+        orient = self._mb_style_orient()[1]
+        prev_m, prev_lay = self._mb_m, self._mb_lay
+        old_origin = None
+        if prev_m is not None and prev_lay is not None and self.mb_visible:
+            try:
+                old_origin = self._mb_origin()
+            except Exception:
+                old_origin = None
         mx, my = mb_margins(orient)
-        self._mb_m = (mx, my)
+        self._mb_imgs = [ph]
+        self._mb_lay, self._mb_m = lay, (mx, my)
         bw, bh = lay["size"]
         cv = self.mb_canvas
         cv.configure(width=bw + 2 * mx, height=bh + 2 * my)
         cv.itemconfig(self._mb_img_item, image=ph)
         cv.coords(self._mb_img_item, mx, my)
-        if prev_m is not None and prev_m != (mx, my):
-            # style / orientation changés : la barre garde sa place à l'écran
-            if self.mb_visible:
-                bx, by = self.mb.winfo_x() + prev_m[0], self.mb.winfo_y() + prev_m[1]
-                bx, by = self._mb_clamp(bx, by)
+        if (prev_m is not None and (prev_m != (mx, my)
+                                    or prev_lay["core"][:2] != lay["core"][:2])):
+            # style / orientation / taille changés : la barre garde sa place
+            if old_origin is not None:
+                bx, by = self._mb_clamp(*old_origin)
                 self._mb_move_bar(bx, by)
-                self.cfg["minibar_pos"] = [bx, by]
-                self.save_config()
+                if (bx, by) != old_origin:
+                    self.cfg["minibar_pos"] = [bx, by]
+                    self.save_config()
             else:
                 self._place_minibar()
         # pseudo affiché un instant quand le perso actif change (capsule, dock)
@@ -2034,6 +2261,8 @@ class App:
                 self.root.after_cancel(self._mb_tip_job)
             self._mb_tip_job = self.root.after(1500, self._mb_auto_tip_end)
         self._mb_tip_refresh()
+        if not retry:
+            return
         # des icônes manquaient (Dofus pas encore prêt) : on retente bientôt,
         # au plus quelques fois, jusqu'à ce que toutes soient récupérées
         if not complete:
@@ -2045,6 +2274,91 @@ class App:
         else:
             self._mb_icon_tries = 0
 
+    # ----- dock animé : zoom continu qui suit la souris -----
+    @staticmethod
+    def _mb_an_new():
+        return {"r": None, "w": 0.0, "u": 0.0, "px": 0.0, "have": False,
+                "hover": False, "ptr": None, "job": None, "t": 0.0}
+
+    def _mb_anim_on(self, style):
+        return (style == "dock" and PIL_OK
+                and bool(self.cfg.get("minibar_anim", True)))
+
+    def _mb_anim_dict(self):
+        an = self._mb_an
+        return {"radii": list(an["r"]), "w": an["w"],
+                "pivot": (an["u"], an["px"]) if an["have"] else None}
+
+    def _mb_anim_kick(self):
+        an = self._mb_an
+        if an["job"] is None and self.mb is not None:
+            an["t"] = time.perf_counter()
+            an["job"] = self.root.after(1, self._mb_anim_tick)
+
+    def _mb_anim_tick(self):
+        """Une image de l'animation : les rayons glissent vers leurs cibles
+        (lissage exponentiel, ~45 ms), le décalage « point sous la souris »
+        apparaît/disparaît en ~80 ms. S'arrête quand tout est stable."""
+        an = self._mb_an
+        an["job"] = None
+        if self.mb is None or getattr(self, "_mb_ctx", None) is None:
+            return
+        style, orient, entries, active, locked, k = self._mb_ctx
+        n = len(entries)
+        if (not self._mb_anim_on(style) or an["r"] is None
+                or len(an["r"]) != n):
+            return
+        now = time.perf_counter()
+        dt = max(0.001, min(0.05, now - an["t"]))
+        an["t"] = now
+        rt = mb_dock_targets(n, active, an["u"] if an["hover"] else None)
+        w_target = 1.0 if an["hover"] else 0.0
+        ar, aw = 1 - math.exp(-dt / 0.045), 1 - math.exp(-dt / 0.08)
+        r = an["r"]
+        for i in range(n):
+            r[i] += (rt[i] - r[i]) * ar
+        an["w"] += (w_target - an["w"]) * aw
+        done = (max([abs(rt[i] - r[i]) for i in range(n)] or [0.0]) < 0.05
+                and abs(w_target - an["w"]) < 0.01)
+        if done:
+            an["r"], an["w"] = list(rt), w_target
+        ph, lay, complete = self._mb_render(style, orient, entries, active,
+                                            locked, k, self._mb_anim_dict())
+        self._mb_apply_frame(ph, lay, complete, style, active, retry=False)
+        self._mb_rehover()
+        if not done:
+            an["job"] = self.root.after(10, self._mb_anim_tick)
+
+    def _mb_ptr_update(self, event, over):
+        """Position de la souris -> point de repos (u) sous le pointeur."""
+        an = self._mb_an
+        if not over or not self._mb_lay["tips"]:
+            an["hover"], an["ptr"] = False, None
+            self._mb_anim_kick()
+            return
+        orient = self._mb_style_orient()[1]
+        k = self._mb_scale()
+        mx, my = self._mb_m
+        px = ((event.x - mx) if orient == "h" else (event.y - my)) / k
+        disp = [(t[0] if orient == "h" else t[1]) / k
+                for t in self._mb_lay["tips"]]
+        an.update(u=mb_dock_u(len(disp), disp, px), px=px, have=True,
+                  hover=True, ptr=(event.x, event.y))
+        self._mb_anim_kick()
+
+    def _mb_rehover(self):
+        """Pendant que la barre bouge sous une souris immobile, le jeton
+        survolé (et son info-bulle) peut changer : on le recalcule."""
+        ptr = self._mb_an["ptr"]
+        i = -1
+        if ptr is not None:
+            hit = self._mb_hit(*ptr)
+            if hit and hit[0] == "tok":
+                i = hit[1]
+        if i != self._mb_hover:
+            self._mb_hover = i
+            self._mb_tip_refresh()
+
     # ----- survol, info-bulle (pseudo) -----
     def _mb_hit(self, x, y):
         if self._mb_lay is None or self._mb_m is None:
@@ -2053,17 +2367,18 @@ class App:
 
     def _mb_tip_side(self):
         """Côté de la barre où poser l'info-bulle, selon sa place à l'écran."""
-        style, orient = self._mb_style_orient()
+        orient = self._mb_style_orient()[1]
         mx, my = self._mb_m
-        bw, bh = self._mb_lay["size"]
+        x0, y0, x1, y1 = self._mb_lay["core"]
         vx, vy, vw, vh = self._virtual_screen()
         try:
             wx, wy = self.mb.winfo_x(), self.mb.winfo_y()
         except Exception:
             wx = wy = 0
         if orient == "h":
-            return "up" if (wy + my) - vy >= MB_TIP_M else "down"
-        return "right" if (wx + mx + bw / 2.0) < vx + vw / 2.0 else "left"
+            return "up" if (wy + my + y0) - vy >= MB_TIP_M else "down"
+        return ("right" if (wx + mx + (x0 + x1) / 2.0) < vx + vw / 2.0
+                else "left")
 
     def _mb_tip_show(self, i):
         if not (0 <= i < len(self._mb_entries)):
@@ -2112,6 +2427,8 @@ class App:
                 cursor="hand2" if hit and hit[0] in ("tok", "lock") else "")
         except Exception:
             pass
+        if self._mb_anim_on(self._mb_style_orient()[0]):
+            self._mb_ptr_update(event, hit is not None)
         if i != self._mb_hover:
             self._mb_hover = i
             self._mb_tip_refresh()
@@ -2122,6 +2439,9 @@ class App:
             self.mb_canvas.configure(cursor="")
         except Exception:
             pass
+        if self._mb_anim_on(self._mb_style_orient()[0]):
+            self._mb_an["hover"], self._mb_an["ptr"] = False, None
+            self._mb_anim_kick()
         self._mb_tip_refresh()
 
     # ----- clics, déplacement, menu -----
@@ -2167,9 +2487,7 @@ class App:
         if not d:
             return
         if d["moved"]:
-            mx, my = self._mb_m
-            self.cfg["minibar_pos"] = [self.mb.winfo_x() + mx,
-                                       self.mb.winfo_y() + my]
+            self.cfg["minibar_pos"] = list(self._mb_origin())
             self.save_config()
         elif d.get("cancel"):
             pass
@@ -2196,11 +2514,17 @@ class App:
             m.grab_release()
 
     # ----- réglage du style, avec aperçu en direct -----
-    def apply_minibar_style(self, style, orient):
+    def apply_minibar_style(self, style, orient, scale=None, anim=None):
         self.cfg["minibar_style"] = style if style in dict(MB_STYLES) else "classic"
         self.cfg["minibar_orient"] = "v" if orient == "v" else "h"
+        if scale is not None:
+            self.cfg["minibar_scale"] = int(max(MB_SCALE_MIN,
+                                                min(MB_SCALE_MAX, scale)))
+        if anim is not None:
+            self.cfg["minibar_anim"] = bool(anim)
         self.save_config()
         self._mb_frames.clear()
+        self._mb_an["r"] = None         # l'animation repart d'un état propre
         self._mb_prev_active = None     # pas d'info-bulle automatique ici
         if self.mb is not None:
             self.fill_minibar()
@@ -2218,7 +2542,8 @@ class App:
                 lambda i, e, size: _mb_fake_icon(size, e[1]), 2)
 
     def minibar_style_dialog(self):
-        """Choix du style et de l'orientation, avec aperçu fidèle en direct."""
+        """Choix du style, de l'orientation et de la taille, avec aperçu
+        fidèle en direct."""
         if not PIL_OK:
             messagebox.showinfo(
                 APP_TITLE,
@@ -2234,6 +2559,7 @@ class App:
             except Exception:
                 self._mb_dlg = None
         cur_style, cur_orient = self._mb_style_orient()
+        cur_scale = int(round(self._mb_scale() * 100))
         dlg = tk.Toplevel(self.root)
         dlg.title("Style de la mini-barre")
         dlg.configure(bg=C_BG)
@@ -2247,20 +2573,31 @@ class App:
         except Exception:
             pass
         sv, ov = tk.StringVar(value=cur_style), tk.StringVar(value=cur_orient)
-        PW, PH = 540, 340
+        scv = tk.IntVar(value=cur_scale)
+        av = tk.BooleanVar(value=bool(self.cfg.get("minibar_anim", True)))
+        PW, PH = 560, 360
         entries, icon_fn, act = self._mb_preview_data()
         body = tk.Frame(dlg, bg=C_BG)
         body.pack(padx=18, pady=(16, 8))
-        cv = tk.Canvas(body, width=PW, height=PH, bg=C_BG, bd=0,
+        right = tk.Frame(body, bg=C_BG)
+        cv = tk.Canvas(right, width=PW, height=PH, bg=C_BG, bd=0,
                        highlightthickness=0)
+        cv.pack()
+        note = tk.Label(right, text="", bg=C_BG, fg=C_TEXT_2,
+                        font=self.f_small, anchor="e")
+        note.pack(fill="x")
         item = cv.create_image(0, 0, anchor="nw", image="")
 
-        def refresh():
-            im = mb_preview_image(sv.get(), ov.get(), entries, act,
-                                  bool(self.cfg.get("minibar_locked", False)),
-                                  icon_fn, (PW, PH))
+        def refresh(*_):
+            im, ratio = mb_preview_image(
+                sv.get(), ov.get(), entries, act,
+                bool(self.cfg.get("minibar_locked", False)), icon_fn,
+                (PW, PH), scale=scv.get() / 100.0)
             cv._ph = ImageTk.PhotoImage(im)
             cv.itemconfig(item, image=cv._ph)
+            note.config(text=("aperçu réduit à %d %%" % round(ratio * 100))
+                        if ratio < 0.999 else "")
+            size_lbl.config(text="%d %%" % scv.get())
 
         left = tk.Frame(body, bg=C_BG)
         left.pack(side="left", fill="y", padx=(0, 16))
@@ -2283,14 +2620,29 @@ class App:
         section("Orientation")
         radio("Horizontale", "h", ov)
         radio("Verticale", "v", ov)
-        cv.pack(side="left")
+        section("Taille")
+        size_lbl = tk.Label(left, text="", bg=C_BG, fg=C_TEXT, font=self.f_body,
+                            anchor="w")
+        size_lbl.pack(fill="x")
+        tk.Scale(left, from_=MB_SCALE_MIN, to=MB_SCALE_MAX, resolution=5,
+                 orient="horizontal", variable=scv, showvalue=False,
+                 length=150, command=refresh, bg=C_ACCENT_D, troughcolor=C_CARD,
+                 highlightthickness=0, bd=0, sliderrelief="flat", width=12,
+                 sliderlength=18, activebackground=C_ACCENT).pack(fill="x")
+        section("Animation")
+        tk.Checkbutton(left, text="Zoom animé du dock", variable=av,
+                       bg=C_BG, fg=C_TEXT, selectcolor=C_CARD,
+                       activebackground=C_BG, activeforeground=C_TEXT,
+                       font=self.f_body, anchor="w", bd=0,
+                       highlightthickness=0, cursor="hand2").pack(fill="x")
+        right.pack(side="left")
 
         def close():
             self._mb_dlg = None
             dlg.destroy()
 
         def apply():
-            self.apply_minibar_style(sv.get(), ov.get())
+            self.apply_minibar_style(sv.get(), ov.get(), scv.get(), av.get())
             close()
 
         row = tk.Frame(dlg, bg=C_BG)
@@ -2309,7 +2661,7 @@ class App:
         dlg.geometry(f"+{(sw - dlg.winfo_reqwidth()) // 2}"
                      f"+{(sh - dlg.winfo_reqheight()) // 3}")
         self._mb_dlg = dlg
-        self._mb_dlg_hooks = (sv, ov, refresh, apply)   # (tests)
+        self._mb_dlg_hooks = (sv, ov, refresh, apply, scv, av)   # (tests)
 
     def make_button(self, parent, text, cmd):
         b = tk.Label(parent, text=text, bg=C_CARD, fg=C_TEXT, font=self.f_small,
@@ -2547,6 +2899,11 @@ class App:
                            selectcolor=C_ACCENT)
         mb.add_command(label="Réinitialiser sa position",
                        command=self.reset_minibar_position)
+        self.var_open_anim = tk.BooleanVar(value=self.cfg.get("open_anim", True))
+        mb.add_checkbutton(label="Animation à la réouverture de Kali",
+                           variable=self.var_open_anim,
+                           command=self.on_toggle_open_anim,
+                           selectcolor=C_ACCENT)
         m.add_cascade(label="Mini-barre", menu=mb)
 
         # ▸ Personnages
@@ -2636,6 +2993,10 @@ class App:
             self.destroy_minibar()
         elif self.minimized:
             self.show_minibar()
+
+    def on_toggle_open_anim(self):
+        self.cfg["open_anim"] = self.var_open_anim.get()
+        self.save_config()
 
     def on_toggle_autoupd(self):
         self.cfg["auto_update"] = self.var_autoupd.get()
@@ -3022,18 +3383,152 @@ class App:
             self.go_to(hid - self.HK_DIRECT_BASE)
 
     # ---------------- zone de notification (systray) ----------------
+    def _on_root_configure(self, event):
+        """Mémorise position et taille de la fenêtre (pour l'animation d'ouverture)."""
+        if event.widget is self.root:
+            try:
+                if self.root.state() == "normal":
+                    self._last_geo = (self.root.winfo_x(), self.root.winfo_y(),
+                                      self.root.winfo_width(),
+                                      self.root.winfo_height())
+            except Exception:
+                pass
+
+    def _anim_origin(self):
+        """Point de départ du zoom : centre de la mini-barre, sinon la zone
+        de notification (coin bas-droit de l'écran)."""
+        try:
+            if self.mb is not None and self.mb_visible and self._mb_lay:
+                x0, y0, x1, y1 = self._mb_lay["core"]
+                mx, my = self._mb_m
+                return (self.mb.winfo_x() + mx + (x0 + x1) / 2.0,
+                        self.mb.winfo_y() + my + (y0 + y1) / 2.0)
+        except Exception:
+            pass
+        return (self.root.winfo_screenwidth() - 70,
+                self.root.winfo_screenheight() - 24)
+
     def restore_from_tray(self):
+        origin = self._anim_origin()
         self.minimized = False
         self.tray.hide()          # retour barre des tâches : icône retirée
         self.destroy_minibar()
+        self._show_main_window(origin)
+
+    def _raise_main(self):
         self.root.deiconify()
         self.root.lift()
         # impulsion "premier plan" pour passer devant, puis relâche
         # (la fenêtre n'est plus épinglée en permanence)
         self.root.attributes("-topmost", True)
         self.root.after(200, lambda: self.root.attributes("-topmost", False))
-        # réapplique coins arrondis + présence barre des tâches
-        self.root.after(50, self.apply_win11_corners)
+
+    def _show_main_window(self, origin):
+        """Réaffiche la fenêtre principale. Les styles Windows (coins arrondis,
+        présence dans la barre des tâches) sont appliqués pendant qu'elle est
+        encore CACHÉE : plus de cycle masquer/réafficher, donc plus de
+        clignotement. Elle apparaît ensuite d'un seul coup, ou avec un zoom
+        depuis la mini-barre façon Mac."""
+        self.apply_win11_corners(cycle=False)
+        if self.cfg.get("open_anim", True) and self._last_geo and PIL_OK:
+            try:
+                if self._open_animation(origin):
+                    return
+            except Exception:
+                self._open_finish()   # échec en route : fenêtre visible et nette
+                return
+        self._raise_main()
+
+    def _run_anim(self, dur, frame, done):
+        """Anime frame(e) de e=0 à 1 (sortie en douceur) pendant `dur` s."""
+        t0 = time.perf_counter()
+
+        def step():
+            t = min(1.0, (time.perf_counter() - t0) / dur)
+            try:
+                frame(1 - (1 - t) ** 3)       # easeOutCubic
+            except Exception:
+                t = 1.0
+            if t >= 1.0:
+                try:
+                    done()
+                except Exception:
+                    pass
+                return
+            self.root.after(8, step)
+        step()
+
+    def _open_animation(self, origin):
+        """Zoom depuis `origin` : on capture la fenêtre (elle-même invisible,
+        déjà à sa place) puis on anime cette image qui grandit en se fondant ;
+        à la fin, la vraie fenêtre prend le relais au pixel près. Si la
+        capture est impossible : simple fondu avec une légère montée."""
+        if self._opening or not self._last_geo:
+            return False
+        x, y, w, h = self._last_geo
+        root = self.root
+        self._opening = True
+        root.attributes("-alpha", 0.0)
+        root.geometry(f"{w}x{h}+{x}+{y}")
+        root.deiconify()
+        root.lift()
+        root.update_idletasks()
+        root.update()
+        hwnd = GetAncestor(int(root.winfo_id()), 2) or int(root.winfo_id())
+        cap = capture_window_image(hwnd)
+        if cap is None:
+            def frame(e):
+                root.attributes("-alpha", min(1.0, e * 1.3))
+                root.geometry(f"+{x}+{y + int((1 - e) * 18)}")
+
+            def done():
+                root.geometry(f"+{x}+{y}")
+                self._open_finish()
+            self._run_anim(0.2, frame, done)
+            return True
+        snap, (sx, sy) = cap
+        gw0, gh0 = snap.size
+        ghost = tk.Toplevel(root)
+        ghost.overrideredirect(True)
+        ghost.attributes("-topmost", True)
+        try:
+            ghost.attributes("-alpha", 0.0)
+        except Exception:
+            pass
+        cv = tk.Canvas(ghost, width=gw0, height=gh0, bd=0,
+                       highlightthickness=0, bg=C_BG)
+        cv.pack()
+        item = cv.create_image(0, 0, anchor="nw", image="")
+        self._ghost = ghost
+        ox, oy = origin
+        fx, fy = sx + gw0 / 2.0, sy + gh0 / 2.0
+
+        def frame(e):
+            s = 0.35 + 0.65 * e
+            gw, gh = max(8, int(gw0 * s)), max(8, int(gh0 * s))
+            cv._ph = ImageTk.PhotoImage(snap.resize((gw, gh), Image.BILINEAR))
+            cv.configure(width=gw, height=gh)
+            cv.itemconfig(item, image=cv._ph)
+            ghost.geometry(f"{gw}x{gh}+{int(ox + (fx - ox) * e - gw / 2.0)}"
+                           f"+{int(oy + (fy - oy) * e - gh / 2.0)}")
+            ghost.attributes("-alpha", min(1.0, e * 1.6))
+        self._run_anim(0.26, frame, self._open_finish)
+        return True
+
+    def _open_finish(self):
+        """Fin (ou abandon) de l'animation : fenêtre réelle visible et opaque."""
+        self._opening = False
+        ghost, self._ghost = self._ghost, None
+        if ghost is not None:
+            try:
+                ghost.destroy()
+            except Exception:
+                pass
+        try:
+            self.root.attributes("-alpha", 1.0)
+        except Exception:
+            pass
+        self._raise_main()
 
     # ---------------- boucle ----------------
     # ---------------- roue des personnages ----------------
