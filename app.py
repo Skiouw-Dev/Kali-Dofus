@@ -118,7 +118,7 @@ VK_CODES = {
 }
 
 APP_TITLE = "Kali"
-APP_VERSION = "4.9"
+APP_VERSION = "5.1"
 
 # Style par classe : (glyphe d'arme stylisé, couleur) — dessins génériques,
 # aucune ressource Ankama. Détecté depuis le titre "Nom - Classe - ...".
@@ -1788,19 +1788,22 @@ class App:
             else:
                 txt = f"⏱ {m}:{s:02d}"
             self.lbl_timer.config(text=txt)
-            # rappel de pause : notification à chaque heure pleine de jeu
-            if (self.cfg.get("break_reminder", True)
-                    and e // 3600 > self.break_notified):
-                self.break_notified = e // 3600
-                hh = self.break_notified
-                try:
-                    self.notify_safe(
-                        "Pense à faire une pause !",
-                        f"Ça fait {hh} heure{'s' if hh > 1 else ''} que tu "
-                        "joues. Bouge un peu, bois de l'eau — Dofus "
-                        "t'attendra. 💧")
-                except Exception:
-                    pass
+            # rappel de pause : notification à chaque heure pleine de jeu.
+            # Le compteur avance MÊME si l'option est désactivée : la
+            # réactiver en cours de partie ne déclenche donc pas un rappel
+            # pour des heures déjà écoulées.
+            hh = e // 3600
+            if hh > self.break_notified:
+                self.break_notified = hh
+                if self.cfg.get("break_reminder", True):
+                    try:
+                        self.notify_safe(
+                            "Pense à faire une pause !",
+                            f"Ça fait {hh} heure{'s' if hh > 1 else ''} que "
+                            "tu joues. Bouge un peu, bois de l'eau — Dofus "
+                            "t'attendra. 💧")
+                    except Exception:
+                        pass
         else:
             self.lbl_timer.config(text="")
             self.break_notified = 0
@@ -1973,12 +1976,17 @@ class App:
 
         # ▸ Notifications
         nt = self._submenu(m)
-        self.var_notify = tk.BooleanVar(
-            value=self.cfg.get("notify_session", True)
-            or self.cfg.get("break_reminder", True))
-        nt.add_checkbutton(label="Temps de jeu & rappels de pause",
-                           variable=self.var_notify,
-                           command=self.on_toggle_notify,
+        self.var_notify_session = tk.BooleanVar(
+            value=self.cfg.get("notify_session", True))
+        nt.add_checkbutton(label="Temps de jeu (bilan à la fermeture)",
+                           variable=self.var_notify_session,
+                           command=self.on_toggle_notify_session,
+                           selectcolor=C_ACCENT)
+        self.var_break = tk.BooleanVar(
+            value=self.cfg.get("break_reminder", True))
+        nt.add_checkbutton(label="Rappel de faire une pause (chaque heure)",
+                           variable=self.var_break,
+                           command=self.on_toggle_break,
                            selectcolor=C_ACCENT)
         m.add_cascade(label="Notifications", menu=nt)
 
@@ -2005,11 +2013,12 @@ class App:
     def show_options(self, event):
         self.opt_menu.tk_popup(event.x_root, event.y_root)
 
-    def on_toggle_notify(self):
-        # une seule option pour les deux notifications de session
-        state = self.var_notify.get()
-        self.cfg["notify_session"] = state
-        self.cfg["break_reminder"] = state
+    def on_toggle_notify_session(self):
+        self.cfg["notify_session"] = self.var_notify_session.get()
+        self.save_config()
+
+    def on_toggle_break(self):
+        self.cfg["break_reminder"] = self.var_break.get()
         self.save_config()
 
     def on_toggle_focus1(self):
