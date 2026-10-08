@@ -119,7 +119,7 @@ VK_CODES = {
 }
 
 APP_TITLE = "Kali"
-APP_VERSION = "5.3"
+APP_VERSION = "5.4"
 
 # Style par classe : (glyphe d'arme stylisé, couleur) — dessins génériques,
 # aucune ressource Ankama. Détecté depuis le titre "Nom - Classe - ...".
@@ -732,6 +732,119 @@ def _mb_capsule(n, orient, active, locked, entries, k, anim=None):
                              "bar": bar, "tips": tips, "core": (0, 0, W, H)}
 
 
+MB_COLS_MIN, MB_COLS_MAX, MB_COLS_DEF = 2, 8, 4
+
+
+def mb_eff_orient(orient, cols, n):
+    """Orientation effective : 'h', 'v' ou 'g<colonnes>' (grille). La grille
+    n'a de sens que s'il y a plus de persos que de colonnes."""
+    try:
+        cols = int(cols)
+    except Exception:
+        cols = 0
+    if cols >= MB_COLS_MIN and n > cols:
+        return "g%d" % min(cols, MB_COLS_MAX)
+    return "v" if orient == "v" else "h"
+
+
+def _mb_grid_cols(orient):
+    try:
+        return max(MB_COLS_MIN, min(MB_COLS_MAX, int(str(orient)[1:])))
+    except Exception:
+        return MB_COLS_DEF
+
+
+def _mb_grid(style, n, cols, active, locked, entries, k):
+    """Grille de `cols` persos par ligne (toujours à l'horizontale), pour les
+    trois styles. Le dock y est statique (pas de zoom animé)."""
+    rows = (n + cols - 1) // cols
+    cc = min(cols, max(n, 1))
+    if style == "classic":
+        R, GAP, HALO, LR = 21, 14, 10, 11
+        cell = 2 * R + GAP
+        top = HALO + 2
+        L = HALO + cc * cell - GAP + 14 + 2 * LR + HALO
+        H = 2 * HALO + rows * cell - GAP + 4
+        W = L
+        x0, y0, pitch = HALO + R, top + R, cell
+    else:
+        dock = style == "dock"
+        R, GAP, PAD, MG = (20, 8, 12, 4) if dock else (19, 8, 12, 4)
+        cell = 2 * R + GAP
+        vpad = 8
+        chh = rows * cell - GAP + 2 * vpad
+        xt = PAD + cc * cell - GAP
+        sep = xt + 10
+        al = sep + 6 + 9
+        L = al + 9 + 12
+        W, H = L + 2 * MG, chh + 2 * MG
+        x0, y0, pitch = MG + PAD + R, MG + vpad + R, cell
+    p = _MBPaint(W, H, k)
+    icons, texts, cells, tips = [], [], [], []
+    bar = None
+    if style != "classic":
+        rad = min(chh / 2.0, 27)
+        p.rrect(MG, MG, MG + L, MG + chh, rad, fill=MB_PANEL,
+                outline=MB_BORDER, width=1)
+        bar = (MG, MG, MG + L, MG + chh)
+    for i, (name, col, hw) in enumerate(entries):
+        r_i, c_i = divmod(i, cols)
+        x, y = x0 + c_i * pitch, y0 + r_i * pitch
+        act = i == active
+        if style == "classic":
+            if act:
+                for q in range(1, 10):
+                    p.circle(x, y, R + q, outline=_mb_over_dark(
+                        MB_ACCENT, int(200 * q / 9.0)), width=2)
+                p.circle(x, y, R + 2, outline=MB_ACCENT, width=1)
+            p.circle(x, y, R, fill=MB_DARK, outline=_mb_rgb(col),
+                     width=3 if act else 2)
+            icons.append((x, y, R - 3, i, 0.0))
+            bx, by = x + R - 5, y + R - 5
+            p.circle(bx, by, 7, fill=MB_ACCENT if act else (43, 43, 43),
+                     outline=MB_DARK, width=1)
+            texts.append((bx, by, str(i + 1), 9,
+                          MB_DARK if act else (154, 154, 154)))
+            rr = R + (HALO if act else 2)
+        else:
+            r = R + (2 if act else 0)
+            if act:
+                p.circle(x, y, r + 4, fill=_mb_over_dark(MB_ACCENT, 70))
+                p.circle(x, y, r + 2, outline=MB_ACCENT, width=2)
+            if dock:
+                p.circle(x, y, r, fill=MB_DARK,
+                         outline=_mb_ring(_mb_rgb(col), act),
+                         width=2.4 if act else 1.8)
+                icons.append((x, y, r - 2.4, i, 0.0 if act else 0.15))
+            else:
+                p.circle(x, y, r, fill=MB_DARK,
+                         outline=MB_ACCENT if act else _mb_mix(
+                             _mb_rgb(col), MB_DARK, .35),
+                         width=2.5 if act else 2)
+                icons.append((x, y, r - 3, i, 0.0 if act else 0.28))
+            rr = r + (6 if act else 3)
+        cy0 = 0 if r_i == 0 else y - pitch / 2.0
+        cy1 = H if r_i == rows - 1 else y + pitch / 2.0
+        cells.append((x - pitch / 2.0, cy0, x + pitch / 2.0, cy1))
+        tips.append((x, y, rr))
+    if style == "classic":
+        lx, ly = HALO + cc * cell - GAP + 14 + LR, H / 2.0
+        p.circle(lx, ly, LR, fill=MB_CARD_ACT if locked else MB_DARK,
+                 outline=MB_ACCENT if locked else (58, 58, 58), width=1)
+        p.lock(lx, ly, LR * 1.15, MB_ACCENT if locked else (154, 154, 154),
+               locked)
+        lock = (lx - LR - 2, ly - LR - 2, lx + LR + 2, ly + LR + 2)
+    else:
+        mid = MG + chh / 2.0
+        sl = min(22, chh - 16) / 2.0
+        p.line(MG + sep, mid - sl, MG + sep, mid + sl, MB_BORDER, 1)
+        lx, ly = MG + al, mid
+        p.lock(lx, ly, 10.4, MB_ACCENT if locked else (154, 154, 154), locked)
+        lock = (lx - 12, ly - 12, lx + 12, ly + 12)
+    return p, icons, texts, {"size": (W, H), "cells": cells, "lock": lock,
+                             "bar": bar, "tips": tips, "core": (0, 0, W, H)}
+
+
 def _mb_bump(d):
     """Profil du zoom : 1 sous le pointeur, 0 à `SPREAD` cellules de distance."""
     sp = MB_DOCK["SPREAD"]
@@ -899,11 +1012,16 @@ def mb_build(style, orient, entries, active, locked, icon_fn, flatten=True,
     icon_fn(i, entry, taille) -> image Pillow ronde ou None.
     scale : taille relative (1.0 = 100 %). anim : état du zoom animé (dock).
     Retourne (image, mise en page, toutes_icônes_trouvées)."""
-    orient = "v" if orient == "v" else "h"
     k = float(scale)
-    fn = {"capsule": _mb_capsule, "dock": _mb_dock}.get(style, _mb_classic)
-    p, icons, texts, lay = fn(len(entries), orient, active, locked, entries,
-                              k, anim)
+    if str(orient).startswith("g"):
+        p, icons, texts, lay = _mb_grid(style, len(entries),
+                                        _mb_grid_cols(orient), active, locked,
+                                        entries, k)
+    else:
+        orient = "v" if orient == "v" else "h"
+        fn = {"capsule": _mb_capsule, "dock": _mb_dock}.get(style, _mb_classic)
+        p, icons, texts, lay = fn(len(entries), orient, active, locked,
+                                  entries, k, anim)
     im = p.done()
     complete = True
     for (x, y, r, i, dim) in icons:
@@ -948,7 +1066,7 @@ def mb_hit(lay, x, y):
 
 def mb_margins(orient):
     """Marges transparentes autour de la barre (place de l'info-bulle)."""
-    return (MB_TIP_X, MB_TIP_M) if orient == "h" else (MB_TIP_W, 8)
+    return (MB_TIP_W, 8) if orient == "v" else (MB_TIP_X, MB_TIP_M)
 
 
 def mb_tip_image(text, color_hex, side):
@@ -1055,7 +1173,8 @@ def mb_preview_image(style, orient, entries, active, locked, icon_fn, box,
     """Aperçu fidèle de la barre (même rendu que la vraie) sur un décor de
     jeu, centré et réduit au besoin pour tenir dans box=(largeur, hauteur).
     Retourne (image, rapport) ; rapport < 1 si l'aperçu a dû être réduit."""
-    orient = "v" if orient == "v" else "h"
+    if not str(orient).startswith("g"):
+        orient = "v" if orient == "v" else "h"
     im, lay, _ = mb_build(style, orient, entries, active, locked, icon_fn,
                           flatten=False, scale=scale)
     bw, bh = lay["size"]
@@ -1063,7 +1182,7 @@ def mb_preview_image(style, orient, entries, active, locked, icon_fn, box,
     scene = Image.new("RGBA", (bw + 2 * mx, bh + 2 * my), (0, 0, 0, 0))
     scene.alpha_composite(im, (mx, my))
     if style != "classic" and 0 <= active < len(entries):
-        side = "up" if orient == "h" else "right"
+        side = "right" if orient == "v" else "up"
         tip, pt = mb_tip_image("%d · %s" % (active + 1, entries[active][0]),
                                entries[active][1], side)
         if tip is not None:
@@ -1863,7 +1982,7 @@ class App:
                "minibar_locked": False, "minibar_pos": None,
                "wheel_enabled": True, "wheel_vk": 0x05,
                "minibar_style": "classic", "minibar_orient": "h",
-               "minibar_scale": 100, "minibar_anim": True, "open_anim": True}
+               "minibar_scale": 100, "minibar_cols": 0, "minibar_anim": True, "open_anim": True}
         try:
             with open(config_path(), "r", encoding="utf-8") as f:
                 cfg.update(json.load(f))
@@ -2035,7 +2154,9 @@ class App:
         style = self.cfg.get("minibar_style", "classic")
         if style not in dict(MB_STYLES):
             style = "classic"
-        return style, ("v" if self.cfg.get("minibar_orient", "h") == "v" else "h")
+        return style, mb_eff_orient(self.cfg.get("minibar_orient", "h"),
+                                    self.cfg.get("minibar_cols", 0),
+                                    len(getattr(self, "order", None) or ()))
 
     def _mb_scale(self):
         try:
@@ -2282,7 +2403,8 @@ class App:
 
     def _mb_anim_on(self, style):
         return (style == "dock" and PIL_OK
-                and bool(self.cfg.get("minibar_anim", True)))
+                and bool(self.cfg.get("minibar_anim", True))
+                and not self._mb_style_orient()[1].startswith("g"))
 
     def _mb_anim_dict(self):
         an = self._mb_an
@@ -2339,8 +2461,8 @@ class App:
         orient = self._mb_style_orient()[1]
         k = self._mb_scale()
         mx, my = self._mb_m
-        px = ((event.x - mx) if orient == "h" else (event.y - my)) / k
-        disp = [(t[0] if orient == "h" else t[1]) / k
+        px = ((event.x - mx) if orient != "v" else (event.y - my)) / k
+        disp = [(t[0] if orient != "v" else t[1]) / k
                 for t in self._mb_lay["tips"]]
         an.update(u=mb_dock_u(len(disp), disp, px), px=px, have=True,
                   hover=True, ptr=(event.x, event.y))
@@ -2375,7 +2497,7 @@ class App:
             wx, wy = self.mb.winfo_x(), self.mb.winfo_y()
         except Exception:
             wx = wy = 0
-        if orient == "h":
+        if orient != "v":
             return "up" if (wy + my + y0) - vy >= MB_TIP_M else "down"
         return ("right" if (wx + mx + (x0 + x1) / 2.0) < vx + vw / 2.0
                 else "left")
@@ -2514,7 +2636,8 @@ class App:
             m.grab_release()
 
     # ----- réglage du style, avec aperçu en direct -----
-    def apply_minibar_style(self, style, orient, scale=None, anim=None):
+    def apply_minibar_style(self, style, orient, scale=None, anim=None,
+                            cols=None):
         self.cfg["minibar_style"] = style if style in dict(MB_STYLES) else "classic"
         self.cfg["minibar_orient"] = "v" if orient == "v" else "h"
         if scale is not None:
@@ -2522,6 +2645,12 @@ class App:
                                                 min(MB_SCALE_MAX, scale)))
         if anim is not None:
             self.cfg["minibar_anim"] = bool(anim)
+        if cols is not None:
+            try:
+                c = int(cols)
+            except Exception:
+                c = 0
+            self.cfg["minibar_cols"] = 0 if c < MB_COLS_MIN else min(c, MB_COLS_MAX)
         self.save_config()
         self._mb_frames.clear()
         self._mb_an["r"] = None         # l'animation repart d'un état propre
@@ -2558,7 +2687,13 @@ class App:
                 return
             except Exception:
                 self._mb_dlg = None
-        cur_style, cur_orient = self._mb_style_orient()
+        cur_style = self._mb_style_orient()[0]
+        cur_orient = ("v" if self.cfg.get("minibar_orient", "h") == "v"
+                      else "h")
+        try:
+            cur_cols = int(self.cfg.get("minibar_cols", 0))
+        except Exception:
+            cur_cols = 0
         cur_scale = int(round(self._mb_scale() * 100))
         dlg = tk.Toplevel(self.root)
         dlg.title("Style de la mini-barre")
@@ -2574,6 +2709,9 @@ class App:
             pass
         sv, ov = tk.StringVar(value=cur_style), tk.StringVar(value=cur_orient)
         scv = tk.IntVar(value=cur_scale)
+        gv = tk.BooleanVar(value=cur_cols >= MB_COLS_MIN)
+        cov = tk.IntVar(value=cur_cols if cur_cols >= MB_COLS_MIN
+                        else MB_COLS_DEF)
         av = tk.BooleanVar(value=bool(self.cfg.get("minibar_anim", True)))
         PW, PH = 560, 360
         entries, icon_fn, act = self._mb_preview_data()
@@ -2589,8 +2727,10 @@ class App:
         item = cv.create_image(0, 0, anchor="nw", image="")
 
         def refresh(*_):
+            eff = mb_eff_orient(ov.get(), cov.get() if gv.get() else 0,
+                                len(entries))
             im, ratio = mb_preview_image(
-                sv.get(), ov.get(), entries, act,
+                sv.get(), eff, entries, act,
                 bool(self.cfg.get("minibar_locked", False)), icon_fn,
                 (PW, PH), scale=scv.get() / 100.0)
             cv._ph = ImageTk.PhotoImage(im)
@@ -2598,6 +2738,11 @@ class App:
             note.config(text=("aperçu réduit à %d %%" % round(ratio * 100))
                         if ratio < 0.999 else "")
             size_lbl.config(text="%d %%" % scv.get())
+            cols_lbl.config(text="%d par ligne" % cov.get())
+            try:
+                cols_sc.config(state="normal" if gv.get() else "disabled")
+            except Exception:
+                pass
 
         left = tk.Frame(body, bg=C_BG)
         left.pack(side="left", fill="y", padx=(0, 16))
@@ -2617,7 +2762,21 @@ class App:
         section("Style", first=True)
         for sid, label in MB_STYLES:
             radio(label, sid, sv)
-        section("Orientation")
+        section("Disposition")
+        radio("En ligne", False, gv)
+        radio("En grille", True, gv)
+        cols_lbl = tk.Label(left, text="", bg=C_BG, fg=C_TEXT, font=self.f_body,
+                            anchor="w")
+        cols_lbl.pack(fill="x")
+        cols_sc = tk.Scale(left, from_=MB_COLS_MIN, to=MB_COLS_MAX,
+                           resolution=1, orient="horizontal", variable=cov,
+                           showvalue=False, length=150, command=refresh,
+                           bg=C_ACCENT_D, troughcolor=C_CARD,
+                           highlightthickness=0, bd=0, sliderrelief="flat",
+                           width=12, sliderlength=18,
+                           activebackground=C_ACCENT)
+        cols_sc.pack(fill="x")
+        section("Orientation (en ligne)")
         radio("Horizontale", "h", ov)
         radio("Verticale", "v", ov)
         section("Taille")
@@ -2642,7 +2801,8 @@ class App:
             dlg.destroy()
 
         def apply():
-            self.apply_minibar_style(sv.get(), ov.get(), scv.get(), av.get())
+            self.apply_minibar_style(sv.get(), ov.get(), scv.get(), av.get(),
+                                     cov.get() if gv.get() else 0)
             close()
 
         row = tk.Frame(dlg, bg=C_BG)
@@ -2661,7 +2821,7 @@ class App:
         dlg.geometry(f"+{(sw - dlg.winfo_reqwidth()) // 2}"
                      f"+{(sh - dlg.winfo_reqheight()) // 3}")
         self._mb_dlg = dlg
-        self._mb_dlg_hooks = (sv, ov, refresh, apply, scv, av)   # (tests)
+        self._mb_dlg_hooks = (sv, ov, refresh, apply, scv, av, gv, cov)   # (tests)
 
     def make_button(self, parent, text, cmd):
         b = tk.Label(parent, text=text, bg=C_CARD, fg=C_TEXT, font=self.f_small,
