@@ -119,7 +119,7 @@ VK_CODES = {
 }
 
 APP_TITLE = "Kali"
-APP_VERSION = "5.4"
+APP_VERSION = "5.5"
 
 # Style par classe : (glyphe d'arme stylisé, couleur) — dessins génériques,
 # aucune ressource Ankama. Détecté depuis le titre "Nom - Classe - ...".
@@ -743,20 +743,30 @@ def mb_eff_orient(orient, cols, n):
     except Exception:
         cols = 0
     if cols >= MB_COLS_MIN and n > cols:
-        return "g%d" % min(cols, MB_COLS_MAX)
+        return ("gv%d" if orient == "v" else "g%d") % min(cols, MB_COLS_MAX)
     return "v" if orient == "v" else "h"
+
+
+def mb_is_v(orient):
+    """Vrai pour une barre verticale, en ligne ('v') ou en grille ('gv4')."""
+    o = str(orient)
+    return o == "v" or o.startswith("gv")
 
 
 def _mb_grid_cols(orient):
     try:
-        return max(MB_COLS_MIN, min(MB_COLS_MAX, int(str(orient)[1:])))
+        return max(MB_COLS_MIN, min(MB_COLS_MAX,
+                                    int(str(orient).lstrip("gv"))))
     except Exception:
         return MB_COLS_DEF
 
 
-def _mb_grid(style, n, cols, active, locked, entries, k):
-    """Grille de `cols` persos par ligne (toujours à l'horizontale), pour les
-    trois styles. Le dock y est statique (pas de zoom animé)."""
+def _mb_grid(style, n, cols, active, locked, entries, k, vert=False):
+    """Grille de `cols` persos par ligne (ou par colonne si `vert`), pour les
+    trois styles. Le dock y est statique (pas de zoom animé). Tout est calculé
+    à l'horizontale puis transposé en vertical."""
+    T = (lambda x, y: (y, x)) if vert else (lambda x, y: (x, y))
+    TR = ((lambda r: (r[1], r[0], r[3], r[2])) if vert else (lambda r: r))
     rows = (n + cols - 1) // cols
     cc = min(cols, max(n, 1))
     if style == "classic":
@@ -779,17 +789,17 @@ def _mb_grid(style, n, cols, active, locked, entries, k):
         L = al + 9 + 12
         W, H = L + 2 * MG, chh + 2 * MG
         x0, y0, pitch = MG + PAD + R, MG + vpad + R, cell
-    p = _MBPaint(W, H, k)
+    p = _MBPaint(*(T(W, H)), k)
     icons, texts, cells, tips = [], [], [], []
     bar = None
     if style != "classic":
         rad = min(chh / 2.0, 27)
-        p.rrect(MG, MG, MG + L, MG + chh, rad, fill=MB_PANEL,
+        p.rrect(*TR((MG, MG, MG + L, MG + chh)), rad, fill=MB_PANEL,
                 outline=MB_BORDER, width=1)
-        bar = (MG, MG, MG + L, MG + chh)
+        bar = TR((MG, MG, MG + L, MG + chh))
     for i, (name, col, hw) in enumerate(entries):
         r_i, c_i = divmod(i, cols)
-        x, y = x0 + c_i * pitch, y0 + r_i * pitch
+        x, y = T(x0 + c_i * pitch, y0 + r_i * pitch)
         act = i == active
         if style == "classic":
             if act:
@@ -823,12 +833,13 @@ def _mb_grid(style, n, cols, active, locked, entries, k):
                          width=2.5 if act else 2)
                 icons.append((x, y, r - 3, i, 0.0 if act else 0.28))
             rr = r + (6 if act else 3)
-        cy0 = 0 if r_i == 0 else y - pitch / 2.0
-        cy1 = H if r_i == rows - 1 else y + pitch / 2.0
-        cells.append((x - pitch / 2.0, cy0, x + pitch / 2.0, cy1))
+        hx, hy = x0 + c_i * pitch, y0 + r_i * pitch
+        cy0 = 0 if r_i == 0 else hy - pitch / 2.0
+        cy1 = H if r_i == rows - 1 else hy + pitch / 2.0
+        cells.append(TR((hx - pitch / 2.0, cy0, hx + pitch / 2.0, cy1)))
         tips.append((x, y, rr))
     if style == "classic":
-        lx, ly = HALO + cc * cell - GAP + 14 + LR, H / 2.0
+        lx, ly = T(HALO + cc * cell - GAP + 14 + LR, H / 2.0)
         p.circle(lx, ly, LR, fill=MB_CARD_ACT if locked else MB_DARK,
                  outline=MB_ACCENT if locked else (58, 58, 58), width=1)
         p.lock(lx, ly, LR * 1.15, MB_ACCENT if locked else (154, 154, 154),
@@ -837,12 +848,14 @@ def _mb_grid(style, n, cols, active, locked, entries, k):
     else:
         mid = MG + chh / 2.0
         sl = min(22, chh - 16) / 2.0
-        p.line(MG + sep, mid - sl, MG + sep, mid + sl, MB_BORDER, 1)
-        lx, ly = MG + al, mid
+        (sx0, sy0), (sx1, sy1) = (T(MG + sep, mid - sl), T(MG + sep, mid + sl))
+        p.line(sx0, sy0, sx1, sy1, MB_BORDER, 1)
+        lx, ly = T(MG + al, mid)
         p.lock(lx, ly, 10.4, MB_ACCENT if locked else (154, 154, 154), locked)
         lock = (lx - 12, ly - 12, lx + 12, ly + 12)
-    return p, icons, texts, {"size": (W, H), "cells": cells, "lock": lock,
-                             "bar": bar, "tips": tips, "core": (0, 0, W, H)}
+    return p, icons, texts, {"size": T(W, H), "cells": cells, "lock": lock,
+                             "bar": bar, "tips": tips,
+                             "core": (0, 0) + T(W, H)}
 
 
 def _mb_bump(d):
@@ -1016,7 +1029,7 @@ def mb_build(style, orient, entries, active, locked, icon_fn, flatten=True,
     if str(orient).startswith("g"):
         p, icons, texts, lay = _mb_grid(style, len(entries),
                                         _mb_grid_cols(orient), active, locked,
-                                        entries, k)
+                                        entries, k, mb_is_v(orient))
     else:
         orient = "v" if orient == "v" else "h"
         fn = {"capsule": _mb_capsule, "dock": _mb_dock}.get(style, _mb_classic)
@@ -1066,7 +1079,7 @@ def mb_hit(lay, x, y):
 
 def mb_margins(orient):
     """Marges transparentes autour de la barre (place de l'info-bulle)."""
-    return (MB_TIP_W, 8) if orient == "v" else (MB_TIP_X, MB_TIP_M)
+    return (MB_TIP_W, 8) if mb_is_v(orient) else (MB_TIP_X, MB_TIP_M)
 
 
 def mb_tip_image(text, color_hex, side):
@@ -1182,7 +1195,7 @@ def mb_preview_image(style, orient, entries, active, locked, icon_fn, box,
     scene = Image.new("RGBA", (bw + 2 * mx, bh + 2 * my), (0, 0, 0, 0))
     scene.alpha_composite(im, (mx, my))
     if style != "classic" and 0 <= active < len(entries):
-        side = "right" if orient == "v" else "up"
+        side = "right" if mb_is_v(orient) else "up"
         tip, pt = mb_tip_image("%d · %s" % (active + 1, entries[active][0]),
                                entries[active][1], side)
         if tip is not None:
@@ -2461,8 +2474,8 @@ class App:
         orient = self._mb_style_orient()[1]
         k = self._mb_scale()
         mx, my = self._mb_m
-        px = ((event.x - mx) if orient != "v" else (event.y - my)) / k
-        disp = [(t[0] if orient != "v" else t[1]) / k
+        px = ((event.x - mx) if not mb_is_v(orient) else (event.y - my)) / k
+        disp = [(t[0] if not mb_is_v(orient) else t[1]) / k
                 for t in self._mb_lay["tips"]]
         an.update(u=mb_dock_u(len(disp), disp, px), px=px, have=True,
                   hover=True, ptr=(event.x, event.y))
@@ -2497,7 +2510,7 @@ class App:
             wx, wy = self.mb.winfo_x(), self.mb.winfo_y()
         except Exception:
             wx = wy = 0
-        if orient != "v":
+        if not mb_is_v(orient):
             return "up" if (wy + my + y0) - vy >= MB_TIP_M else "down"
         return ("right" if (wx + mx + (x0 + x1) / 2.0) < vx + vw / 2.0
                 else "left")
@@ -2776,7 +2789,7 @@ class App:
                            width=12, sliderlength=18,
                            activebackground=C_ACCENT)
         cols_sc.pack(fill="x")
-        section("Orientation (en ligne)")
+        section("Orientation")
         radio("Horizontale", "h", ov)
         radio("Verticale", "v", ov)
         section("Taille")
