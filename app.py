@@ -119,7 +119,7 @@ VK_CODES = {
 }
 
 APP_TITLE = "Kali"
-APP_VERSION = "5.8"
+APP_VERSION = "5.9"
 HUNG_KILL_SEC = 5         # fenêtre figée : délai avant fermeture forcée
 AUTO_QUIT_MIN = 15       # fermeture auto : minutes sans fenêtre Dofus
 
@@ -1314,6 +1314,58 @@ def config_path():
     return os.path.join(base, "config.json")
 
 
+def playtime_path():
+    return os.path.join(os.path.dirname(config_path()), "playtime.json")
+
+
+PT_KEEP_DAYS = 400         # historique conservé (jours)
+_PT_DAYS_FR = ("lun", "mar", "mer", "jeu", "ven", "sam", "dim")
+
+
+def load_playtime():
+    """Historique du temps de jeu : {"YYYY-MM-DD": {"t": secondes, "a": {compte: s}}}."""
+    try:
+        with open(playtime_path(), "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        days = raw.get("days", {}) if isinstance(raw, dict) else {}
+        out = {}
+        for k, v in days.items():
+            if isinstance(v, dict) and isinstance(v.get("t"), (int, float)):
+                a = v.get("a", {})
+                out[str(k)] = {"t": float(v["t"]),
+                               "a": {str(n): float(x) for n, x in a.items()
+                                     if isinstance(x, (int, float))}
+                               if isinstance(a, dict) else {}}
+        keep = sorted(out)[-PT_KEEP_DAYS:]
+        return {k: out[k] for k in keep}
+    except Exception:
+        return {}
+
+
+def save_playtime(days):
+    """Écriture atomique (fichier temporaire puis remplacement) : un arrêt
+    brutal du PC ne corrompt jamais l'historique."""
+    try:
+        path = playtime_path()
+        tmp = path + ".tmp"
+        slim = {k: {"t": round(v["t"], 1),
+                    "a": {n: round(x, 1) for n, x in v["a"].items()}}
+                for k, v in days.items()}
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"days": slim}, f, ensure_ascii=False)
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
+
+def fmt_dur(sec):
+    m = int(round(sec / 60.0))
+    if m < 1:
+        return "0 min" if sec < 30 else "1 min"
+    h, m = divmod(m, 60)
+    return "%d h %02d" % (h, m) if h else "%d min" % m
+
+
 _START_TIME = time.time()
 _LOG_FILE = None
 _LOG_BUDGET = 1000000      # octets max écrits par session (anti-boucle d'erreurs)
@@ -1930,6 +1982,11 @@ class App:
         self.anim_running = False
         self.session_start = None  # début de la session Dofus en cours
         self._hung = {}            # hwnd -> (depuis quand figée, nom)
+        self.pt = load_playtime()  # historique du temps de jeu (par jour)
+        self._pt_last = None
+        self._pt_saved = time.time()
+        self._pt_dirty = False
+        self._pt_dlg = None
         self.idle_since = None     # depuis quand aucun Dofus n'est ouvert
         self._last_refresh = None
         self.minimized = False
@@ -2104,6 +2161,7 @@ class App:
         self.lbl_timer = tk.Label(tbar, text="", bg=C_BG, fg=C_TEXT_2,
                                   font=self.f_small)
         self.lbl_timer.pack(side="right", padx=(0, 8))
+        self.lbl_timer.bind("<Button-1>", lambda e: self.playtime_dialog())
         self.update_timer()
 
         # déplacer la fenêtre en tirant la barre de titre
@@ -2986,8 +3044,190 @@ class App:
         if now - self.idle_since >= AUTO_QUIT_MIN * 60:
             self.on_close()
 
+    def pt_tick(self):
+        """Ajoute au jour courant le temps écoulé tant qu'au moins une fenêtre
+        Dofus est ouverte (appelé 1x/s). Un grand trou (veille du PC, UI
+        bloquée) n'est pas compté. Sauvegarde toutes les 60 s."""
+        now = time.time()
+        last, self._pt_last = self._pt_last, now
+        if last is not None and self.windows and 0 < now - last <= 10:
+            dt = now - last
+            day = time.strftime("%Y-%m-%d", time.localtime(now))
+            d = self.pt.setdefault(day, {"t": 0.0, "a": {}})
+            d["t"] += dt
+            for name in self.windows:
+                d["a"][name] = d["a"].get(name, 0.0) + dt
+            self._pt_dirty = True
+        if self._pt_dirty and now - self._pt_saved >= 60:
+            self.pt_flush()
+
+    def pt_flush(self):
+        if self._pt_dirty:
+            for k in sorted(self.pt)[:-PT_KEEP_DAYS]:
+                self.pt.pop(k, None)
+            save_playtime(self.pt)
+            self._pt_dirty = False
+        self._pt_saved = time.time()
+
+    def pt_stats(self, today=None):
+        """(aujourd'hui, 7 j, 30 j, moyenne/jour joué sur 30 j, record)."""
+        today = today or time.time()
+        def tot(n):
+            return sum(self.pt.get(time.strftime(
+                "%Y-%m-%d", time.localtime(today - i * 86400)), {}).get("t", 0.0)
+                for i in range(n))
+        played = [self.pt.get(time.strftime(
+            "%Y-%m-%d", time.localtime(today - i * 86400)), {}).get("t", 0.0)
+            for i in range(30)]
+        played = [x for x in played if x >= 60]
+        rec = max([v["t"] for v in self.pt.values()] or [0.0])
+        return (tot(1), tot(7), tot(30),
+                (sum(played) / len(played)) if played else 0.0, rec)
+
+    def playtime_dialog(self):
+        """Historique du temps de jeu : totaux, graphique par jour, détail
+        par compte. Se met à jour tout seul tant qu'il est ouvert."""
+        if self._pt_dlg is not None:
+            try:
+                self._pt_dlg.lift()
+                self._pt_dlg.focus_force()
+                return
+            except Exception:
+                self._pt_dlg = None
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Historique du temps de jeu")
+        dlg.configure(bg=C_BG)
+        dlg.resizable(False, False)
+        try:   # barre de titre sombre (Windows 11)
+            dlg.update_idletasks()
+            h = GetAncestor(int(dlg.winfo_id()), 2) or int(dlg.winfo_id())
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                h, 20, ctypes.byref(ctypes.c_int(1)), 4)
+        except Exception:
+            pass
+        span = tk.IntVar(value=14)
+        CW, CH = 560, 190
+        top = tk.Frame(dlg, bg=C_BG)
+        top.pack(fill="x", padx=18, pady=(16, 6))
+        stat_lbl = []
+        for title in ("Aujourd'hui", "7 jours", "30 jours", "Moy. / jour", "Record"):
+            card = tk.Frame(top, bg=C_CARD, padx=12, pady=8)
+            card.pack(side="left", expand=True, fill="x", padx=3)
+            tk.Label(card, text=title, bg=C_CARD, fg=C_TEXT_2,
+                     font=self.f_small).pack(anchor="w")
+            v = tk.Label(card, text="", bg=C_CARD, fg=C_TEXT, font=self.f_body)
+            v.pack(anchor="w")
+            stat_lbl.append(v)
+        bar = tk.Frame(dlg, bg=C_BG)
+        bar.pack(fill="x", padx=18)
+        for n in (7, 14, 30):
+            tk.Radiobutton(bar, text="%d jours" % n, value=n, variable=span,
+                           command=lambda: draw(), bg=C_BG, fg=C_TEXT,
+                           selectcolor=C_CARD, activebackground=C_BG,
+                           activeforeground=C_TEXT, font=self.f_small, bd=0,
+                           highlightthickness=0, cursor="hand2").pack(side="left")
+        cv = tk.Canvas(dlg, width=CW, height=CH, bg=C_CARD, bd=0,
+                       highlightthickness=0)
+        cv.pack(padx=18, pady=(6, 8))
+        box = tk.Text(dlg, width=72, height=9, bg=C_CARD, fg=C_TEXT,
+                      font=self.f_small, bd=0, highlightthickness=0,
+                      padx=10, pady=8, wrap="word", cursor="arrow")
+        sb = tk.Scrollbar(dlg, command=box.yview)
+        box.configure(yscrollcommand=sb.set)
+        box.pack(padx=(18, 0), pady=(0, 16), side="left")
+        sb.pack(side="left", fill="y", pady=(0, 16), padx=(0, 18))
+        box.tag_configure("d", foreground=C_TEXT_2)
+        box.tag_configure("t", foreground=C_ACCENT)
+
+        def draw():
+            now = time.time()
+            for lbl, val in zip(stat_lbl, self.pt_stats(now)):
+                lbl.config(text=fmt_dur(val))
+            n = span.get()
+            days = [time.localtime(now - i * 86400) for i in range(n - 1, -1, -1)]
+            keys = [time.strftime("%Y-%m-%d", d) for d in days]
+            vals = [self.pt.get(k, {}).get("t", 0.0) for k in keys]
+            cv.delete("all")
+            mx = max(vals + [3600.0])
+            base, top_pad, left = CH - 24, 26, 14
+            slot = (CW - 2 * left) / float(n)
+            bw = max(4, slot * 0.62)
+            for i, (k, v) in enumerate(zip(keys, vals)):
+                x = left + i * slot + (slot - bw) / 2
+                hgt = (base - top_pad) * v / mx
+                today = i == n - 1
+                if v > 0:
+                    cv.create_rectangle(x, base - max(hgt, 2), x + bw, base,
+                                        fill=C_ACCENT if today else C_ACCENT_D,
+                                        width=0)
+                else:
+                    cv.create_line(x, base - 1, x + bw, base - 1, fill=C_STROKE)
+                if n <= 14 and v > 0:
+                    cv.create_text(x + bw / 2, base - hgt - 9, text=fmt_dur(v),
+                                   fill=C_TEXT_2, font=self.f_small)
+                if n <= 14 or i % 5 == 0 or today:
+                    d = days[i]
+                    cv.create_text(x + bw / 2, base + 12,
+                                   text=(_PT_DAYS_FR[d.tm_wday] if n <= 7 else
+                                         "%d/%d" % (d.tm_mday, d.tm_mon)),
+                                   fill=C_TEXT if today else C_TEXT_2,
+                                   font=self.f_small)
+            box.config(state="normal")
+            box.delete("1.0", "end")
+            shown = 0
+            for k in sorted(self.pt, reverse=True):
+                d = self.pt[k]
+                if d["t"] < 30:
+                    continue
+                try:
+                    tm = time.strptime(k, "%Y-%m-%d")
+                    label = "%s %02d/%02d/%d" % (_PT_DAYS_FR[tm.tm_wday],
+                                                 tm.tm_mday, tm.tm_mon, tm.tm_year)
+                except Exception:
+                    label = k
+                box.insert("end", label + "   ", "d")
+                box.insert("end", fmt_dur(d["t"]) + "\n", "t")
+                accs = sorted(d["a"].items(), key=lambda kv: -kv[1])
+                if accs:
+                    box.insert("end", "      " + "  ·  ".join(
+                        "%s %s" % (nm, fmt_dur(sec)) for nm, sec in accs
+                        if sec >= 30) + "\n", "d")
+                shown += 1
+            if not shown:
+                box.insert("end", "Aucune session enregistrée pour l'instant.\n"
+                           "Le temps de jeu est compté automatiquement dès "
+                           "qu'une fenêtre Dofus est ouverte.", "d")
+            box.config(state="disabled")
+
+        def loop():
+            if self._pt_dlg is None:
+                return
+            try:
+                draw()
+                dlg.after(5000, loop)
+            except Exception:
+                pass
+
+        def close():
+            self._pt_dlg = None
+            dlg.destroy()
+
+        dlg.protocol("WM_DELETE_WINDOW", close)
+        dlg.bind("<Escape>", lambda e: close())
+        self._pt_dlg = dlg
+        draw()
+        dlg.update_idletasks()
+        sw, sh = dlg.winfo_screenwidth(), dlg.winfo_screenheight()
+        dlg.geometry(f"+{(sw - dlg.winfo_reqwidth()) // 2}"
+                     f"+{(sh - dlg.winfo_reqheight()) // 3}")
+        dlg.after(5000, loop)
+
     def update_timer(self):
         """Met à jour le chrono de session dans la barre de titre (1x/s)."""
+        try:
+            self.pt_tick()
+        except Exception:
+            pass
         if self.session_start is not None:
             e = int(time.time() - self.session_start)
             h, m, s = e // 3600, (e % 3600) // 60, e % 60
@@ -3204,6 +3444,8 @@ class App:
                            command=self.on_toggle_break,
                            selectcolor=C_ACCENT)
         m.add_cascade(label="Notifications", menu=nt)
+        m.add_command(label="Historique du temps de jeu…",
+                      command=self.playtime_dialog)
 
         self.var_killhung = tk.BooleanVar(value=self.cfg.get("kill_hung", False))
         m.add_checkbutton(label="Fermer de force une fenêtre figée (%d s)"
@@ -4307,6 +4549,10 @@ class App:
     def on_close(self):
         try:
             self.tray.remove_now()
+        except Exception:
+            pass
+        try:
+            self.pt_flush()
         except Exception:
             pass
         self.save_config()
