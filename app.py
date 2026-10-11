@@ -119,7 +119,8 @@ VK_CODES = {
 }
 
 APP_TITLE = "Kali"
-APP_VERSION = "5.6"
+APP_VERSION = "5.7"
+HUNG_KILL_SEC = 30        # fenêtre figée : délai avant fermeture forcée
 AUTO_QUIT_MIN = 15       # fermeture auto : minutes sans fenêtre Dofus
 
 # Style par classe : (glyphe d'arme stylisé, couleur) — dessins génériques,
@@ -1478,6 +1479,37 @@ def get_window_title(hwnd):
 _EXE_CACHE = {}    # (hwnd, pid) -> (exe, expiration)
 
 
+def kill_dofus_process(hwnd):
+    """Termine de force le processus Dofus qui possède `hwnd`. Sécurités :
+    le nom du processus est relu à l'instant T (pas de cache) et doit
+    contenir « dofus » — une fenêtre « fantôme » de Windows appartient à un
+    autre processus (dwm), qu'on ne touche jamais. Retourne True si tué."""
+    k = ctypes.WinDLL("kernel32", use_last_error=True)
+    k.OpenProcess.restype = wt.HANDLE
+    k.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
+    k.QueryFullProcessImageNameW.argtypes = [wt.HANDLE, wt.DWORD,
+                                             wt.LPWSTR, ctypes.POINTER(wt.DWORD)]
+    k.TerminateProcess.argtypes = [wt.HANDLE, wt.UINT]
+    k.CloseHandle.argtypes = [wt.HANDLE]
+    pid = wt.DWORD()
+    GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    if not pid.value or pid.value == os.getpid():
+        return False
+    h = k.OpenProcess(0x0001 | 0x1000, False, pid.value)  # TERMINATE | QUERY_LIMITED
+    if not h:
+        return False
+    try:
+        size = wt.DWORD(1024)
+        buf = ctypes.create_unicode_buffer(size.value)
+        if not k.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+            return False
+        if "dofus" not in os.path.basename(buf.value).lower():
+            return False
+        return bool(k.TerminateProcess(h, 1))
+    finally:
+        k.CloseHandle(h)
+
+
 def get_process_exe(hwnd):
     """Retourne le nom de l'exécutable (ex: 'dofus.exe') de la fenêtre.
 
@@ -1897,6 +1929,7 @@ class App:
         self.drag = None
         self.anim_running = False
         self.session_start = None  # début de la session Dofus en cours
+        self._hung = {}            # hwnd -> (depuis quand figée, nom)
         self.idle_since = None     # depuis quand aucun Dofus n'est ouvert
         self._last_refresh = None
         self.minimized = False
@@ -1993,7 +2026,7 @@ class App:
     # ---------------- config ----------------
     def load_config(self):
         cfg = {"hk_next": "F1", "hk_prev": "F2", "topmost": True, "order": [],
-               "notify_session": True, "direct_mod": "Alt", "auto_update": True, "break_reminder": True, "auto_quit": True,
+               "notify_session": True, "direct_mod": "Alt", "auto_update": True, "break_reminder": True, "auto_quit": True, "kill_hung": False,
                "minibar": True, "auto_focus_first": True,
                "minibar_locked": False, "minibar_pos": None,
                "wheel_enabled": True, "wheel_vk": 0x05,
@@ -2908,6 +2941,36 @@ class App:
         self.render_list()
         self.save_config()
 
+    def check_hung(self):
+        """Ferme de force une fenêtre Dofus figée (« ne répond pas ») depuis
+        HUNG_KILL_SEC secondes. Une fenêtre qui se fige peut disparaître de la
+        liste (Windows la remplace par une fenêtre fantôme) : on la suit donc
+        par son identifiant tant qu'elle existe."""
+        if not self.cfg.get("kill_hung", False):
+            self._hung.clear()
+            return
+        now = time.time()
+        names = {h: n for n, h in self.windows.items()}
+        prev_seen, self._seen = getattr(self, "_seen", {}), dict(names)
+        for hwnd in set(names) | set(prev_seen) | set(self._hung):
+            try:
+                hung = bool(IsWindow(hwnd) and IsHungAppWindow(hwnd))
+            except Exception:
+                hung = False
+            if not hung:
+                self._hung.pop(hwnd, None)
+                continue
+            since, name = self._hung.get(
+                hwnd, (now, names.get(hwnd) or prev_seen.get(hwnd, "Dofus")))
+            self._hung[hwnd] = (since, names.get(hwnd, name))
+            if now - since >= HUNG_KILL_SEC:
+                self._hung.pop(hwnd, None)
+                if kill_dofus_process(hwnd):
+                    log_line("Fenêtre figée fermée de force : %s" % name)
+                    self.notify_safe(APP_TITLE, "%s ne répondait plus depuis "
+                                     "%d s : fenêtre fermée." % (name, HUNG_KILL_SEC))
+                    self.root.after(1500, self.refresh_windows)
+
     def check_auto_quit(self, n_open):
         """Ferme Kali si aucun Dofus n'est ouvert depuis AUTO_QUIT_MIN minutes.
         Une veille du PC (grand trou entre deux détections) remet le compteur
@@ -3142,6 +3205,10 @@ class App:
                            selectcolor=C_ACCENT)
         m.add_cascade(label="Notifications", menu=nt)
 
+        self.var_killhung = tk.BooleanVar(value=self.cfg.get("kill_hung", False))
+        m.add_checkbutton(label="Fermer de force une fenêtre figée (%d s)"
+                          % HUNG_KILL_SEC, variable=self.var_killhung,
+                          command=self.on_toggle_killhung, selectcolor=C_ACCENT)
         self.var_autoquit = tk.BooleanVar(value=self.cfg.get("auto_quit", True))
         m.add_checkbutton(label="Quitter si aucun Dofus pendant %d min"
                           % AUTO_QUIT_MIN, variable=self.var_autoquit,
@@ -3169,6 +3236,11 @@ class App:
 
     def show_options(self, event):
         self.opt_menu.tk_popup(event.x_root, event.y_root)
+
+    def on_toggle_killhung(self):
+        self.cfg["kill_hung"] = self.var_killhung.get()
+        self._hung.clear()
+        self.save_config()
 
     def on_toggle_autoquit(self):
         self.cfg["auto_quit"] = self.var_autoquit.get()
@@ -4179,6 +4251,10 @@ class App:
             names = {name for _, name, _ in wins}
             if names != set(self.windows.keys()):
                 self.refresh_windows()
+        except Exception:
+            pass
+        try:
+            self.check_hung()
         except Exception:
             pass
         try:
