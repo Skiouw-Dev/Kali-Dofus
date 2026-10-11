@@ -119,7 +119,7 @@ VK_CODES = {
 }
 
 APP_TITLE = "Kali"
-APP_VERSION = "5.9"
+APP_VERSION = "6.0"
 HUNG_KILL_SEC = 5         # fenêtre figée : délai avant fermeture forcée
 AUTO_QUIT_MIN = 15       # fermeture auto : minutes sans fenêtre Dofus
 
@@ -1319,6 +1319,8 @@ def playtime_path():
 
 
 PT_KEEP_DAYS = 400         # historique conservé (jours)
+PT_DESIGNS = (("bars", "Barres"), ("line", "Courbe"),
+              ("cal", "Calendrier"), ("list", "Semaine"))
 _PT_DAYS_FR = ("lun", "mar", "mer", "jeu", "ven", "sam", "dim")
 
 
@@ -2174,6 +2176,9 @@ class App:
         bar.pack(fill="x", padx=10, pady=(4, 6))
         self.btn_refresh = self.make_button(bar, "⟳  Actualiser", self.refresh_windows)
         self.btn_refresh.pack(side="left")
+        self.btn_playtime = self.make_button(bar, "📊  Temps de jeu",
+                                             self.playtime_dialog)
+        self.btn_playtime.pack(side="left", padx=(6, 0))
         self.lbl_count = tk.Label(bar, text="", bg=C_BG, fg=C_TEXT_2,
                                   font=self.f_small)
         self.lbl_count.pack(side="right")
@@ -3106,6 +3111,9 @@ class App:
         except Exception:
             pass
         span = tk.IntVar(value=14)
+        design = tk.StringVar(value=self.cfg.get("pt_design", "bars"))
+        if design.get() not in dict(PT_DESIGNS):
+            design.set("bars")
         CW, CH = 560, 190
         top = tk.Frame(dlg, bg=C_BG)
         top.pack(fill="x", padx=18, pady=(16, 6))
@@ -3120,15 +3128,48 @@ class App:
             stat_lbl.append(v)
         bar = tk.Frame(dlg, bg=C_BG)
         bar.pack(fill="x", padx=18)
-        for n in (7, 14, 30):
-            tk.Radiobutton(bar, text="%d jours" % n, value=n, variable=span,
-                           command=lambda: draw(), bg=C_BG, fg=C_TEXT,
-                           selectcolor=C_CARD, activebackground=C_BG,
-                           activeforeground=C_TEXT, font=self.f_small, bd=0,
-                           highlightthickness=0, cursor="hand2").pack(side="left")
+
+        def pick_design():
+            self.cfg["pt_design"] = design.get()
+            self.save_config()
+            draw()
+
+        for did, label in PT_DESIGNS:      # le style du graphique
+            tk.Radiobutton(bar, text=label, value=did, variable=design,
+                           command=pick_design, indicatoron=False,
+                           bg=C_CARD, fg=C_TEXT_2, selectcolor=C_ACCENT_D,
+                           activebackground=C_CARD_HOV, activeforeground=C_TEXT,
+                           font=self.f_small, bd=0, highlightthickness=0,
+                           padx=12, pady=3, cursor="hand2").pack(side="left",
+                                                                 padx=(0, 4))
+        span_rb = []
+        for n in (30, 14, 7):              # la durée affichée
+            rb = tk.Radiobutton(bar, text="%d j" % n, value=n, variable=span,
+                                command=lambda: draw(), bg=C_BG, fg=C_TEXT,
+                                selectcolor=C_CARD, activebackground=C_BG,
+                                activeforeground=C_TEXT, font=self.f_small,
+                                bd=0, highlightthickness=0, cursor="hand2")
+            rb.pack(side="right")
+            span_rb.append(rb)
         cv = tk.Canvas(dlg, width=CW, height=CH, bg=C_CARD, bd=0,
                        highlightthickness=0)
-        cv.pack(padx=18, pady=(6, 8))
+        cv.pack(padx=18, pady=(6, 2))
+        info = tk.Label(dlg, text="", bg=C_BG, fg=C_TEXT_2, font=self.f_small,
+                        anchor="w")
+        info.pack(fill="x", padx=20, pady=(0, 4))
+        cal_cells = []
+
+        def on_motion(e):
+            txt = ""
+            for (x0, y0, x1, y1, t) in cal_cells:
+                if x0 <= e.x <= x1 and y0 <= e.y <= y1:
+                    txt = t
+                    break
+            if info.cget("text") != txt:
+                info.config(text=txt)
+
+        cv.bind("<Motion>", on_motion)
+        cv.bind("<Leave>", lambda e: info.config(text=""))
         box = tk.Text(dlg, width=72, height=9, bg=C_CARD, fg=C_TEXT,
                       font=self.f_small, bd=0, highlightthickness=0,
                       padx=10, pady=8, wrap="word", cursor="arrow")
@@ -3139,15 +3180,17 @@ class App:
         box.tag_configure("d", foreground=C_TEXT_2)
         box.tag_configure("t", foreground=C_ACCENT)
 
-        def draw():
-            now = time.time()
-            for lbl, val in zip(stat_lbl, self.pt_stats(now)):
-                lbl.config(text=fmt_dur(val))
-            n = span.get()
+        def _series(now, n):
             days = [time.localtime(now - i * 86400) for i in range(n - 1, -1, -1)]
             keys = [time.strftime("%Y-%m-%d", d) for d in days]
-            vals = [self.pt.get(k, {}).get("t", 0.0) for k in keys]
-            cv.delete("all")
+            return days, keys, [self.pt.get(k, {}).get("t", 0.0) for k in keys]
+
+        def _day_label(d, short):
+            return (_PT_DAYS_FR[d.tm_wday] if short else
+                    "%d/%d" % (d.tm_mday, d.tm_mon))
+
+        def _draw_bars(now, n):
+            days, keys, vals = _series(now, n)
             mx = max(vals + [3600.0])
             base, top_pad, left = CH - 24, 26, 14
             slot = (CW - 2 * left) / float(n)
@@ -3166,12 +3209,128 @@ class App:
                     cv.create_text(x + bw / 2, base - hgt - 9, text=fmt_dur(v),
                                    fill=C_TEXT_2, font=self.f_small)
                 if n <= 14 or i % 5 == 0 or today:
-                    d = days[i]
                     cv.create_text(x + bw / 2, base + 12,
-                                   text=(_PT_DAYS_FR[d.tm_wday] if n <= 7 else
-                                         "%d/%d" % (d.tm_mday, d.tm_mon)),
+                                   text=_day_label(days[i], n <= 7),
                                    fill=C_TEXT if today else C_TEXT_2,
                                    font=self.f_small)
+
+        def _draw_line(now, n):
+            days, keys, vals = _series(now, n)
+            mx = max(vals + [3600.0])
+            base, top_pad, left, right = CH - 24, 20, 52, 28
+            step = (CW - left - right) / float(max(n - 1, 1))
+            for fr in (0.0, 0.5, 1.0):         # repères horizontaux
+                y = base - (base - top_pad) * fr
+                cv.create_line(left, y, CW - right, y, fill=C_STROKE, dash=(2, 4))
+                cv.create_text(left - 8, y, text=fmt_dur(mx * fr), anchor="e",
+                               fill=C_TEXT_2, font=self.f_small)
+            pts = [(left + i * step, base - (base - top_pad) * v / mx)
+                   for i, v in enumerate(vals)]
+            cv.create_polygon([(left, base)] + pts + [(pts[-1][0], base)],
+                              fill="#0f3a5f", outline="")
+            cv.create_line(*[c for p in pts for c in p], fill=C_ACCENT,
+                           width=2, smooth=False, joinstyle="round")
+            for i, (x, y) in enumerate(pts):
+                if n <= 14 or i == n - 1:
+                    r = 4 if i == n - 1 else 3
+                    cv.create_oval(x - r, y - r, x + r, y + r,
+                                   fill=C_ACCENT if i == n - 1 else C_CARD,
+                                   outline=C_ACCENT, width=2)
+                cal_cells.append((x - step / 2, 0, x + step / 2, CH,
+                                  "%s %02d/%02d : %s" % (
+                                      _PT_DAYS_FR[days[i].tm_wday],
+                                      days[i].tm_mday, days[i].tm_mon,
+                                      fmt_dur(vals[i]))))
+                if n <= 14 or i % 5 == 0 or i == n - 1:
+                    cv.create_text(x, base + 12, text=_day_label(days[i], n <= 7),
+                                   fill=C_TEXT if i == n - 1 else C_TEXT_2,
+                                   font=self.f_small)
+
+        def _draw_cal(now):
+            W_, CELL, GAP = 17, 20, 3
+            tm = time.localtime(now)
+            monday = now - tm.tm_wday * 86400          # lundi de cette semaine
+            first = monday - (W_ - 1) * 7 * 86400
+            allv = [self.pt.get(time.strftime("%Y-%m-%d",
+                    time.localtime(first + (w * 7 + r) * 86400)), {}).get("t", 0.0)
+                    for w in range(W_) for r in range(7)]
+            mx = max(allv + [3600.0])
+            shades = ("#0b3a63", "#0a5ca0", "#0078d4", "#4cc2ff")
+            gw = W_ * (CELL + GAP) - GAP
+            ox, oy = (CW - gw) // 2 + 14, 24
+            last_m = -1
+            for w in range(W_):
+                for r in range(7):
+                    ts = first + (w * 7 + r) * 86400
+                    if ts > now + 3600:
+                        continue
+                    lt = time.localtime(ts)
+                    v = self.pt.get(time.strftime("%Y-%m-%d", lt), {}).get("t", 0.0)
+                    x, y = ox + w * (CELL + GAP), oy + r * (CELL + GAP)
+                    col = ("#262626" if v < 60 else
+                           shades[min(3, int(4 * v / (mx + 1)))])
+                    cv.create_rectangle(x, y, x + CELL, y + CELL, fill=col,
+                                        width=2 if ts > now - 86400 else 0,
+                                        outline=C_TEXT if ts > now - 86400
+                                        else col)
+                    cal_cells.append((x, y, x + CELL, y + CELL,
+                                      "%s %02d/%02d/%d : %s" % (
+                                          _PT_DAYS_FR[lt.tm_wday], lt.tm_mday,
+                                          lt.tm_mon, lt.tm_year, fmt_dur(v))))
+                    if r == 0 and lt.tm_mon != last_m:
+                        last_m = lt.tm_mon
+                        cv.create_text(x, oy - 11, anchor="w", font=self.f_small,
+                                       fill=C_TEXT_2, text=("jan fév mar avr mai "
+                                       "juin juil août sep oct nov déc").split()
+                                       [lt.tm_mon - 1])
+            for r in (0, 2, 4, 6):
+                cv.create_text(ox - 8, oy + r * (CELL + GAP) + CELL / 2,
+                               text=_PT_DAYS_FR[r], anchor="e", fill=C_TEXT_2,
+                               font=self.f_small)
+
+        def _draw_list(now):
+            days, keys, vals = _series(now, 7)
+            mx = max(vals + [3600.0])
+            rowh, left, right = 25, 50, 80
+            for i in range(7):
+                y = 8 + (6 - i) * rowh + 0           # aujourd'hui en haut
+                j = 6 - i
+                v, d = vals[j], days[j]
+                cv.create_text(left - 10, y + rowh / 2 - 2,
+                               text=_PT_DAYS_FR[d.tm_wday], anchor="e",
+                               fill=C_TEXT if j == 6 else C_TEXT_2,
+                               font=self.f_small)
+                cv.create_rectangle(left, y + 4, CW - right, y + rowh - 8,
+                                    fill="#262626", width=0)
+                if v > 0:
+                    cv.create_rectangle(left, y + 4, left + (CW - right - left)
+                                        * v / mx, y + rowh - 8,
+                                        fill=C_ACCENT if j == 6 else C_ACCENT_D,
+                                        width=0)
+                cv.create_text(CW - right + 10, y + rowh / 2 - 2,
+                               text=fmt_dur(v), anchor="w", fill=C_TEXT_2,
+                               font=self.f_small)
+
+        def draw():
+            now = time.time()
+            for lbl, val in zip(stat_lbl, self.pt_stats(now)):
+                lbl.config(text=fmt_dur(val))
+            des = design.get()
+            n = 7 if des in ("list",) else (span.get() if des != "cal" else 0)
+            for rb in span_rb:
+                rb.config(state="normal" if des in ("bars", "line")
+                          else "disabled")
+            cv.delete("all")
+            del cal_cells[:]
+            info.config(text="")
+            if des == "cal":
+                _draw_cal(now)
+            elif des == "list":
+                _draw_list(now)
+            elif des == "line":
+                _draw_line(now, n)
+            else:
+                _draw_bars(now, n)
             box.config(state="normal")
             box.delete("1.0", "end")
             shown = 0
@@ -3444,17 +3603,18 @@ class App:
                            command=self.on_toggle_break,
                            selectcolor=C_ACCENT)
         m.add_cascade(label="Notifications", menu=nt)
-        m.add_command(label="Historique du temps de jeu…",
-                      command=self.playtime_dialog)
 
+        # ▸ Fermeture
+        fm = self._submenu(m)
         self.var_killhung = tk.BooleanVar(value=self.cfg.get("kill_hung", False))
-        m.add_checkbutton(label="Fermer de force une fenêtre figée (%d s)"
-                          % HUNG_KILL_SEC, variable=self.var_killhung,
-                          command=self.on_toggle_killhung, selectcolor=C_ACCENT)
+        fm.add_checkbutton(label="Fermer de force une fenêtre Dofus figée (%d s)"
+                           % HUNG_KILL_SEC, variable=self.var_killhung,
+                           command=self.on_toggle_killhung, selectcolor=C_ACCENT)
         self.var_autoquit = tk.BooleanVar(value=self.cfg.get("auto_quit", True))
-        m.add_checkbutton(label="Quitter si aucun Dofus pendant %d min"
-                          % AUTO_QUIT_MIN, variable=self.var_autoquit,
-                          command=self.on_toggle_autoquit, selectcolor=C_ACCENT)
+        fm.add_checkbutton(label="Quitter Kali si aucun Dofus pendant %d min"
+                           % AUTO_QUIT_MIN, variable=self.var_autoquit,
+                           command=self.on_toggle_autoquit, selectcolor=C_ACCENT)
+        m.add_cascade(label="Fermeture", menu=fm)
 
         # ▸ Mises à jour
         up = self._submenu(m)
