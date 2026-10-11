@@ -119,7 +119,7 @@ VK_CODES = {
 }
 
 APP_TITLE = "Kali"
-APP_VERSION = "6.0"
+APP_VERSION = "6.1"
 HUNG_KILL_SEC = 5         # fenêtre figée : délai avant fermeture forcée
 AUTO_QUIT_MIN = 15       # fermeture auto : minutes sans fenêtre Dofus
 
@@ -1351,7 +1351,7 @@ def save_playtime(days):
         path = playtime_path()
         tmp = path + ".tmp"
         slim = {k: {"t": round(v["t"], 1),
-                    "a": {n: round(x, 1) for n, x in v["a"].items()}}
+                    "a": {}}
                 for k, v in days.items()}
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump({"days": slim}, f, ensure_ascii=False)
@@ -2159,6 +2159,14 @@ class App:
         btn_opt.bind("<Leave>", lambda e: btn_opt.configure(bg=C_BG, fg=C_TEXT_2))
         self.build_options_menu()
 
+        # bouton temps de jeu (petite icône, à gauche de l'engrenage)
+        btn_pt = tk.Label(tbar, text="📊", bg=C_BG, fg=C_TEXT_2,
+                          font=("Segoe UI Emoji", 10), padx=6, cursor="hand2")
+        btn_pt.pack(side="right", fill="y")
+        btn_pt.bind("<Button-1>", lambda e: self.playtime_dialog())
+        btn_pt.bind("<Enter>", lambda e: btn_pt.configure(bg=C_CARD_HOV, fg=C_TEXT))
+        btn_pt.bind("<Leave>", lambda e: btn_pt.configure(bg=C_BG, fg=C_TEXT_2))
+
         # chrono de session (dans l'espace vide, ne change pas la mise en page)
         self.lbl_timer = tk.Label(tbar, text="", bg=C_BG, fg=C_TEXT_2,
                                   font=self.f_small)
@@ -2176,9 +2184,6 @@ class App:
         bar.pack(fill="x", padx=10, pady=(4, 6))
         self.btn_refresh = self.make_button(bar, "⟳  Actualiser", self.refresh_windows)
         self.btn_refresh.pack(side="left")
-        self.btn_playtime = self.make_button(bar, "📊  Temps de jeu",
-                                             self.playtime_dialog)
-        self.btn_playtime.pack(side="left", padx=(6, 0))
         self.lbl_count = tk.Label(bar, text="", bg=C_BG, fg=C_TEXT_2,
                                   font=self.f_small)
         self.lbl_count.pack(side="right")
@@ -3055,13 +3060,15 @@ class App:
         bloquée) n'est pas compté. Sauvegarde toutes les 60 s."""
         now = time.time()
         last, self._pt_last = self._pt_last, now
-        if last is not None and self.windows and 0 < now - last <= 10:
+        # « en jeu » = au moins un personnage connecté (le titre de la fenêtre
+        # contient alors la classe) ; un écran de connexion ne compte pas.
+        # Temps d'équipe : jouer 3 comptes ensemble compte une seule fois.
+        ingame = any(n in self.klass for n in self.windows)
+        if last is not None and ingame and 0 < now - last <= 10:
             dt = now - last
             day = time.strftime("%Y-%m-%d", time.localtime(now))
             d = self.pt.setdefault(day, {"t": 0.0, "a": {}})
             d["t"] += dt
-            for name in self.windows:
-                d["a"][name] = d["a"].get(name, 0.0) + dt
             self._pt_dirty = True
         if self._pt_dirty and now - self._pt_saved >= 60:
             self.pt_flush()
@@ -3170,7 +3177,7 @@ class App:
 
         cv.bind("<Motion>", on_motion)
         cv.bind("<Leave>", lambda e: info.config(text=""))
-        box = tk.Text(dlg, width=72, height=9, bg=C_CARD, fg=C_TEXT,
+        box = tk.Text(dlg, width=72, height=8, bg=C_CARD, fg=C_TEXT,
                       font=self.f_small, bd=0, highlightthickness=0,
                       padx=10, pady=8, wrap="word", cursor="arrow")
         sb = tk.Scrollbar(dlg, command=box.yview)
@@ -3346,16 +3353,11 @@ class App:
                     label = k
                 box.insert("end", label + "   ", "d")
                 box.insert("end", fmt_dur(d["t"]) + "\n", "t")
-                accs = sorted(d["a"].items(), key=lambda kv: -kv[1])
-                if accs:
-                    box.insert("end", "      " + "  ·  ".join(
-                        "%s %s" % (nm, fmt_dur(sec)) for nm, sec in accs
-                        if sec >= 30) + "\n", "d")
                 shown += 1
             if not shown:
                 box.insert("end", "Aucune session enregistrée pour l'instant.\n"
                            "Le temps de jeu est compté automatiquement dès "
-                           "qu'une fenêtre Dofus est ouverte.", "d")
+                           "qu'un personnage est connecté.", "d")
             box.config(state="disabled")
 
         def loop():
