@@ -119,7 +119,8 @@ VK_CODES = {
 }
 
 APP_TITLE = "Kali"
-APP_VERSION = "5.5"
+APP_VERSION = "5.6"
+AUTO_QUIT_MIN = 15       # fermeture auto : minutes sans fenêtre Dofus
 
 # Style par classe : (glyphe d'arme stylisé, couleur) — dessins génériques,
 # aucune ressource Ankama. Détecté depuis le titre "Nom - Classe - ...".
@@ -1896,6 +1897,8 @@ class App:
         self.drag = None
         self.anim_running = False
         self.session_start = None  # début de la session Dofus en cours
+        self.idle_since = None     # depuis quand aucun Dofus n'est ouvert
+        self._last_refresh = None
         self.minimized = False
         self.mb = None             # mini-barre flottante (mode réduit)
         self.mb_visible = False
@@ -1990,7 +1993,7 @@ class App:
     # ---------------- config ----------------
     def load_config(self):
         cfg = {"hk_next": "F1", "hk_prev": "F2", "topmost": True, "order": [],
-               "notify_session": True, "direct_mod": "Alt", "auto_update": True, "break_reminder": True,
+               "notify_session": True, "direct_mod": "Alt", "auto_update": True, "break_reminder": True, "auto_quit": True,
                "minibar": True, "auto_focus_first": True,
                "minibar_locked": False, "minibar_pos": None,
                "wheel_enabled": True, "wheel_vk": 0x05,
@@ -2905,6 +2908,21 @@ class App:
         self.render_list()
         self.save_config()
 
+    def check_auto_quit(self, n_open):
+        """Ferme Kali si aucun Dofus n'est ouvert depuis AUTO_QUIT_MIN minutes.
+        Une veille du PC (grand trou entre deux détections) remet le compteur
+        à zéro, pour ne pas quitter au réveil."""
+        now = time.time()
+        last, self._last_refresh = self._last_refresh, now
+        if n_open > 0 or not self.cfg.get("auto_quit", True):
+            self.idle_since = None
+            return
+        if self.idle_since is None or (last is not None and now - last > 90):
+            self.idle_since = now
+            return
+        if now - self.idle_since >= AUTO_QUIT_MIN * 60:
+            self.on_close()
+
     def update_timer(self):
         """Met à jour le chrono de session dans la barre de titre (1x/s)."""
         if self.session_start is not None:
@@ -3124,6 +3142,11 @@ class App:
                            selectcolor=C_ACCENT)
         m.add_cascade(label="Notifications", menu=nt)
 
+        self.var_autoquit = tk.BooleanVar(value=self.cfg.get("auto_quit", True))
+        m.add_checkbutton(label="Quitter si aucun Dofus pendant %d min"
+                          % AUTO_QUIT_MIN, variable=self.var_autoquit,
+                          command=self.on_toggle_autoquit, selectcolor=C_ACCENT)
+
         # ▸ Mises à jour
         up = self._submenu(m)
         self.var_autoupd = tk.BooleanVar(value=self.cfg.get("auto_update", True))
@@ -3146,6 +3169,11 @@ class App:
 
     def show_options(self, event):
         self.opt_menu.tk_popup(event.x_root, event.y_root)
+
+    def on_toggle_autoquit(self):
+        self.cfg["auto_quit"] = self.var_autoquit.get()
+        self.idle_since = None
+        self.save_config()
 
     def on_toggle_notify_session(self):
         self.cfg["notify_session"] = self.var_notify_session.get()
@@ -4151,6 +4179,10 @@ class App:
             names = {name for _, name, _ in wins}
             if names != set(self.windows.keys()):
                 self.refresh_windows()
+        except Exception:
+            pass
+        try:
+            self.check_auto_quit(len(self.windows))
         except Exception:
             pass
         self.root.after(3000, self.tick)
