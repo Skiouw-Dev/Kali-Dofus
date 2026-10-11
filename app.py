@@ -119,8 +119,8 @@ VK_CODES = {
 }
 
 APP_TITLE = "Kali"
-APP_VERSION = "5.7"
-HUNG_KILL_SEC = 30        # fenêtre figée : délai avant fermeture forcée
+APP_VERSION = "5.8"
+HUNG_KILL_SEC = 5         # fenêtre figée : délai avant fermeture forcée
 AUTO_QUIT_MIN = 15       # fermeture auto : minutes sans fenêtre Dofus
 
 # Style par classe : (glyphe d'arme stylisé, couleur) — dessins génériques,
